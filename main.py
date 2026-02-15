@@ -34,33 +34,60 @@ INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
 
 def scrape_target_url(url, allowed_domains):
     """
-    Two-step scraper:
-    1. Looks for Telegram link.
-    2. If not found, looks for an intermediary link matching our domains, and scrapes that.
+    Two-step scraper with Anti-403 Short URL Bypass:
+    1. Unshortens links using HEAD requests to skip bot checks.
+    2. Looks for Telegram link.
+    3. If not found, looks for an intermediary link.
     """
     print(f"Scraping URL: {url}")
+    
+    # --- ANTI-403 SHORTURL BYPASS ---
+    try:
+        # Realistic browser header to blend in
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36'}
+        
+        # Send a HEAD request instead of GET. This forces the server to just give us the redirect location.
+        pre_check = requests.head(url, headers=headers, allow_redirects=False, timeout=10)
+        
+        # If the server responds with a redirect status code (301, 302, etc.)
+        if pre_check.status_code in [301, 302, 303, 307, 308] and 'Location' in pre_check.headers:
+            new_url = pre_check.headers['Location']
+            print(f"✅ Bypassed Short URL! Resolved to: {new_url}")
+            url = new_url  # Replace the short link with the real destination
+    except Exception as e:
+        print(f"HEAD bypass check failed, continuing with original URL: {e}")
+    # --------------------------------
+
     try:
         scraper = cloudscraper.create_scraper(
             browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
         )
         
-        # Step 1: Scrape the first page
-        response = scraper.get(url, allow_redirects=True, timeout=15)
-        response.raise_for_status()
-        html_content = response.text
+        # Step 1: Scrape the page
+        try:
+            response = scraper.get(url, allow_redirects=True, timeout=15)
+            response.raise_for_status()
+            html_content = response.text
+        except requests.exceptions.HTTPError as e:
+            # Fallback: Sometimes Cloudflare blocks Cloudscraper but allows a plain request with a modern User-Agent
+            if e.response.status_code == 403:
+                print("⚠️ Cloudscraper blocked (403). Falling back to standard requests...")
+                response = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
+                response.raise_for_status()
+                html_content = response.text
+            else:
+                raise e
         
         # Regex for Telegram deep links (supports hyphens and underscores in tokens)
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
         match = re.search(tg_pattern, html_content)
         
         if match:
-            print("Found Telegram link on the FIRST page!")
+            print("✅ Found Telegram link on the FIRST page!")
             return match.group(1)
             
         # Step 2: Telegram link not found. Look for an intermediary link.
         print("No Telegram link found. Searching for intermediary links...")
-        
-        # Find all URLs in the HTML (href="...")
         link_pattern = r'href=["\'](https?://[^\'"]+)["\']'
         all_links = re.findall(link_pattern, html_content)
         
@@ -74,29 +101,36 @@ def scrape_target_url(url, allowed_domains):
                 break
                 
         if not intermediary_link:
-            print("Failed: No intermediary links matched our domain list.")
+            print("❌ Failed: No intermediary links matched our domain list.")
             return None
             
         # Step 3: Scrape the intermediary page
         print(f"Found matching intermediary link: {intermediary_link}")
         print("Scraping intermediary page...")
         
-        response2 = scraper.get(intermediary_link, allow_redirects=True, timeout=15)
-        response2.raise_for_status()
-        html_content2 = response2.text
+        try:
+            response2 = scraper.get(intermediary_link, allow_redirects=True, timeout=15)
+            response2.raise_for_status()
+            html_content2 = response2.text
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                response2 = requests.get(intermediary_link, headers=headers, allow_redirects=True, timeout=15)
+                response2.raise_for_status()
+                html_content2 = response2.text
+            else:
+                raise e
         
         match2 = re.search(tg_pattern, html_content2)
         if match2:
-            print("Found Telegram link on the SECOND page!")
+            print("✅ Found Telegram link on the SECOND page!")
             return match2.group(1)
         else:
-            print("Failed: Intermediary page did not contain a Telegram link.")
+            print("❌ Failed: Intermediary page did not contain a Telegram link.")
             
     except Exception as e:
-        print(f"Error scraping URL: {e}")
+        print(f"❌ Error scraping URL: {e}")
         
     return None
-
 def get_all_links(event):
     """ Extracts ALL URLs from a message (Inline Buttons + Text Hyperlinks) """
     urls = set()
@@ -220,3 +254,4 @@ async def main():
 if __name__ == '__main__':
     # asyncio.run ensures an Event Loop is properly created for Heroku
     asyncio.run(main())
+
