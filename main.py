@@ -115,5 +115,14 @@ async def handler(event):
         await asyncio.sleep(2)
 
 print("Starting bot...")
-client.start()
-client.run_until_disconnected()
+# DELETE the old startup lines at the bottom and PASTE this instead:
+
+async def main():
+    print("Starting bot...")
+    # This starts the client and keeps it running
+    await client.start()
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    # This creates the event loop automatically
+    asyncio.run(main())
