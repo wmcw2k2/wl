@@ -215,4 +215,43 @@ async def handler(event):
             try:
                 print(f"Interacting with @{bot_username}...")
                 async with client.conversation(bot_username, timeout=20) as conv:
-                    await conv.send
+                    await conv.send_message(f"/start {start_token}")
+                    response = await conv.get_response()
+
+                    limit = 3
+                    while limit > 0 and not response.media:
+                         response = await conv.get_response()
+                         limit -= 1
+
+                    if response.media:
+                        print("Video received! Forwarding...")
+                        await client.send_file(
+                            DESTINATION_CHAT, 
+                            response.media, 
+                            caption=f"Extracted from {chat_name}"
+                        )
+                    else:
+                        print("Bot replied, but did not send a media file.")
+                        await client.send_message(
+                            'me', 
+                            f"⚠️ **Target Bot Failed**\n@{bot_username} did not send a video for link:\n{url_to_visit}"
+                        )
+            except asyncio.TimeoutError:
+                 print("Conversation timed out.")
+                 await client.send_message(
+                     'me', 
+                     f"⏱ **Timeout**\n@{bot_username} took too long to respond for link:\n{url_to_visit}"
+                 )
+            except Exception as e:
+                print(f"Conversation failed: {e}")
+        
+        await asyncio.sleep(2)
+
+# --- STARTUP LOGIC ---
+async def main():
+    print("Starting bot...")
+    await client.start()
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    asyncio.run(main())
