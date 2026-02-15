@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import cloudscraper
+import requests
 from urllib.parse import urlparse
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
@@ -254,4 +255,5 @@ async def main():
 if __name__ == '__main__':
     # asyncio.run ensures an Event Loop is properly created for Heroku
     asyncio.run(main())
+
 
