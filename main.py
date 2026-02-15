@@ -33,14 +33,13 @@ INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
 
 def scrape_target_url(url, allowed_domains):
     """
-    Two-step scraper using curl_cffi to perfectly impersonate Chrome 
-    and bypass strict Cloudflare 403 blocks on short links.
+    Two-step scraper using curl_cffi.
+    Includes a filter to ignore static assets like .ico and .jpg.
     """
     print(f"Scraping URL: {url}")
     
     try:
-        # Step 1: Scrape the first page (with Chrome impersonation)
-        # allow_redirects=True automatically follows shorturl.at to its destination
+        # Step 1: Scrape the first page
         response = c_requests.get(
             url, 
             impersonate="chrome110", 
@@ -54,7 +53,7 @@ def scrape_target_url(url, allowed_domains):
             
         html_content = response.text
         
-        # Regex for Telegram deep links (supports hyphens and underscores)
+        # Regex for Telegram deep links 
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
         match = re.search(tg_pattern, html_content)
         
@@ -68,17 +67,29 @@ def scrape_target_url(url, allowed_domains):
         link_pattern = r'href=["\'](https?://[^\'"]+)["\']'
         all_links = re.findall(link_pattern, html_content)
         
+        # ---> NEW FILTER LOGIC HERE <---
+        # Files we absolutely do not want to scrape as web pages
+        ignored_extensions = ('.ico', '.png', '.jpg', '.jpeg', '.css', '.js', '.gif', '.svg', '.webp')
+        
         intermediary_link = None
         for link in all_links:
+            # Remove any query parameters like "?v=1.0" before checking the extension
+            clean_link = link.lower().split('?')[0]
+            
+            # Skip if the link is just a static image/file
+            if clean_link.endswith(ignored_extensions):
+                continue
+                
             for domain in allowed_domains:
                 if domain in link:
                     intermediary_link = link
                     break
             if intermediary_link:
                 break
+        # --------------------------------
                 
         if not intermediary_link:
-            print("❌ Failed: No intermediary links matched our domain list.")
+            print("❌ Failed: No valid HTML intermediary links matched our domain list.")
             return None
             
         # Step 3: Scrape the intermediary page
@@ -233,6 +244,7 @@ async def main():
 if __name__ == '__main__':
     # asyncio.run ensures an Event Loop is properly created for Heroku
     asyncio.run(main())
+
 
 
 
