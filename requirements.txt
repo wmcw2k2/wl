@@ -1,3 +1,2 @@
 telethon
-requests
-cloudscraper
+curl_cffi
