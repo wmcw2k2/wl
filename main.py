@@ -68,7 +68,7 @@ def scrape_target_url(url, allowed_domains):
         # Step 2: Telegram link not found. Look for an intermediary link.
         print("No Telegram link found. Searching for intermediary links...")
         
-        link_pattern = r'href=["\'](https?://[^\'"]+)["\']'
+        link_pattern = r'["\'](https?://[^\'"]+)["\']'
         all_links = re.findall(link_pattern, html_content)
         
         intermediary_link = None
@@ -255,3 +255,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
