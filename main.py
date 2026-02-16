@@ -19,7 +19,7 @@ SOURCE_CHATS = [
     -1002634794692,  
     '@Ukussapremium_bot', 
     2047350734,
-    '@ PremiumJil_bot'
+    '@PremiumJil_bot'
             
 ]
 
