@@ -68,17 +68,26 @@ def scrape_target_url(url, allowed_domains):
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
             if img_match and sess_match:
-                file_host = img_match.group(1)
-                file_hash = img_match.group(2)
-                sess_id = sess_match.group(1)
+                file_host = img_match.group(1).strip()
+                file_hash = img_match.group(2).strip()
+                sess_id = sess_match.group(1).strip()
                 
                 v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
-                v_val = v_match.group(1) if v_match else "1771587749"
+                v_val = v_match.group(1).strip() if v_match else "1771587749"
                 
-                video_url = f"https://{file_host.strip()}/thumb_video/{file_hash.strip()}.mp4?v={v_val.strip()}&PHPSESSID={sess_id.strip()}"
-                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                # Create the base URL WITHOUT the ? and &
+                base_video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4"
                 
-                return "DIRECT_VIDEO", video_url
+                # Put the variables in a dictionary
+                url_params = {
+                    "v": v_val,
+                    "PHPSESSID": sess_id
+                }
+                
+                print(f"✅ Extracted Files.fm Video: {base_video_url}")
+                
+                # Return the base URL and the dictionary safely
+                return "DIRECT_VIDEO", (base_video_url, url_params)
         # =========================================================
 
         # Regex for Telegram deep links
@@ -146,17 +155,26 @@ def scrape_target_url(url, allowed_domains):
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
             if img_match and sess_match:
-                file_host = img_match.group(1)
-                file_hash = img_match.group(2)
-                sess_id = sess_match.group(1)
+                file_host = img_match.group(1).strip()
+                file_hash = img_match.group(2).strip()
+                sess_id = sess_match.group(1).strip()
                 
                 v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
-                v_val = v_match.group(1) if v_match else "1771587749"
+                v_val = v_match.group(1).strip() if v_match else "1771587749"
                 
-                video_url = f"https://{file_host.strip()}/thumb_video/{file_hash.strip()}.mp4?v={v_val.strip()}&PHPSESSID={sess_id.strip()}"
-                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                # Create the base URL WITHOUT the ? and &
+                base_video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4"
                 
-                return "DIRECT_VIDEO", video_url
+                # Put the variables in a dictionary
+                url_params = {
+                    "v": v_val,
+                    "PHPSESSID": sess_id
+                }
+                
+                print(f"✅ Extracted Files.fm Video: {base_video_url}")
+                
+                # Return the base URL and the dictionary safely
+                return "DIRECT_VIDEO", (base_video_url, url_params)
         # =========================================================
         
         match2 = re.search(tg_pattern, html_content)
@@ -235,28 +253,38 @@ async def handler(event):
         # Download Direct Video and Upload to Telegram
         # ==========================================================
         if bot_start_link == "DIRECT_VIDEO":
-            video_url = debug_content
-            print(f"Downloading direct video from {video_url}...")
+            # Unpack the base URL and the dictionary of parameters
+            base_video_url, url_params = debug_content 
+            
+            print(f"Downloading direct video safely using params...")
             
             try:
-                # We use c_requests to spoof chrome incase the host blocks python
-                vid_response = c_requests.get(video_url, impersonate="chrome110", timeout=120)
+                # By passing 'params=url_params', Python handles the ? and & 
+                # safely so the URL never gets cut off!
+                vid_response = c_requests.get(
+                    base_video_url, 
+                    params=url_params, 
+                    impersonate="chrome110", 
+                    timeout=60
+                )
                 
                 if vid_response.status_code == 200:
-                    # Write to a temporary file instead of pure RAM buffer for stability
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
                         temp_file_name = tmp_file.name
                         tmp_file.write(vid_response.content)
                         
                     print("Video downloaded! Uploading to Destination Channel...")
+                    
+                    # We can manually reconstruct it for the caption if we want to show it
+                    caption_url = f"{base_video_url}?v={url_params['v']}&PHPSESSID={url_params['PHPSESSID']}"
+                    
                     await client.send_file(
                         DESTINATION_CHAT, 
                         file=temp_file_name, 
                         caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}"
                     )
                     os.remove(temp_file_name)  # Clean up storage
-                    print("Upload complete and temp file removed.")
-                    continue # Successfully finished this link, skip to next loop iteration
+                    continue 
                 else:
                     print(f"Failed to download video. Status code: {vid_response.status_code}")
                     bot_start_link = None
@@ -334,5 +362,6 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
 
 
