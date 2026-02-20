@@ -75,7 +75,7 @@ def scrape_target_url(url, allowed_domains):
                 v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
                 v_val = v_match.group(1) if v_match else "1771587749"
                 
-                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+                video_url = f"https://{file_host.strip()}/thumb_video/{file_hash.strip()}.mp4?v={v_val.strip()}&PHPSESSID={sess_id.strip()}"
                 print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
                 
                 return "DIRECT_VIDEO", video_url
@@ -153,7 +153,7 @@ def scrape_target_url(url, allowed_domains):
                 v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
                 v_val = v_match.group(1) if v_match else "1771587749"
                 
-                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+                video_url = f"https://{file_host.strip()}/thumb_video/{file_hash.strip()}.mp4?v={v_val.strip()}&PHPSESSID={sess_id.strip()}"
                 print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
                 
                 return "DIRECT_VIDEO", video_url
@@ -334,4 +334,5 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
 
