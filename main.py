@@ -11,7 +11,7 @@ from curl_cffi import requests as c_requests
 
 # ================= CONFIGURATION =================
 # Pulled from Heroku Environment Variables
-API_ID = int(os.environ.get('API_ID', '0')) # Default to 0 to prevent crash if missing locally
+API_ID = int(os.environ.get('API_ID', '0')) 
 API_HASH = os.environ.get('API_HASH', '')
 SESSION_STRING = os.environ.get('SESSION_STRING', '')
 
@@ -25,13 +25,10 @@ SOURCE_CHATS = [
 
 DESTINATION_CHAT = -1001676677601 
 
-# Default domains to search for if the direct Telegram link isn't found.
 DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm"]
 # =================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-
-# We store our search keywords in a set to avoid duplicates
 INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
 
 def scrape_target_url(url, allowed_domains):
@@ -40,9 +37,8 @@ def scrape_target_url(url, allowed_domains):
     Returns a tuple: (extracted_link, html_content_for_debugging)
     """
     print(f"Scraping URL: {url}")
-    
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
-    html_content = "" # Keep track of the HTML so we can return it on failure
+    html_content = "" 
 
     try:
         # Step 1: Scrape the first page
@@ -63,19 +59,19 @@ def scrape_target_url(url, allowed_domains):
         # =========================================================
         if "files.fm" in url:
             print("Detecting files.fm (Step 1), attempting to extract direct video variables...")
-            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
+            
+            # Extract the actual original file download link instead of the thumb_video preview
+            down_match = re.search(r'https://([^/]+)/down\.php\?i=([^&"\'\s]+)&n=([^"\'\s]+)', html_content)
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
-            if img_match and sess_match:
-                file_host = img_match.group(1).strip()
-                file_hash = img_match.group(2).strip()
+            if down_match and sess_match:
+                file_host = down_match.group(1).strip()
+                file_hash = down_match.group(2).strip()
+                file_name = down_match.group(3).strip()
                 sess_id = sess_match.group(1).strip()
                 
-                v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
-                v_val = v_match.group(1).strip() if v_match else "1771587749"
-                
-                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
-                video_url = video_url.strip()
+                # Construct the official, authenticated download URL
+                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&n={file_name}"
                 
                 print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
                 return "DIRECT_VIDEO", video_url
@@ -140,19 +136,17 @@ def scrape_target_url(url, allowed_domains):
         # =========================================================
         if "files.fm" in intermediary_link:
             print("Detecting files.fm (Step 3), attempting to extract direct video variables...")
-            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
+            
+            down_match = re.search(r'https://([^/]+)/down\.php\?i=([^&"\'\s]+)&n=([^"\'\s]+)', html_content)
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
-            if img_match and sess_match:
-                file_host = img_match.group(1).strip()
-                file_hash = img_match.group(2).strip()
+            if down_match and sess_match:
+                file_host = down_match.group(1).strip()
+                file_hash = down_match.group(2).strip()
+                file_name = down_match.group(3).strip()
                 sess_id = sess_match.group(1).strip()
                 
-                v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
-                v_val = v_match.group(1).strip() if v_match else "1771587749"
-                
-                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
-                video_url = video_url.strip()
+                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&n={file_name}"
                 
                 print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
                 return "DIRECT_VIDEO", video_url
@@ -171,7 +165,7 @@ def scrape_target_url(url, allowed_domains):
 
 
 def get_all_links(event):
-    """ Extracts ALL URLs from a message (Inline Buttons + Text Hyperlinks) """
+    """ Extracts ALL URLs from a message """
     urls = set()
     if event.message.buttons:
         for row in event.message.buttons:
@@ -194,12 +188,10 @@ def get_all_links(event):
 @client.on(events.NewMessage(pattern=r'/adddomain (.*)', from_users='me'))
 async def add_domain_handler(event):
     url = event.pattern_match.group(1).strip()
-    
     try:
         netloc = urlparse(url).netloc
         if netloc.startswith('www.'):
             netloc = netloc[4:]
-        
         keyword = netloc.split('.')[0] 
         
         if keyword:
@@ -207,7 +199,6 @@ async def add_domain_handler(event):
             await event.reply(f"✅ Successfully added keyword: **{keyword}**\n\nCurrently active domains:\n{', '.join(INTERMEDIARY_DOMAINS)}")
         else:
             await event.reply("❌ Could not extract a valid domain from that link.")
-            
     except Exception as e:
         await event.reply(f"❌ Error parsing link: {e}")
 
@@ -233,14 +224,11 @@ async def handler(event):
         bot_start_link, debug_content = scrape_result
 
         # ==========================================================
-        # FEATURE: Download Direct Video via System Curl
-        # ==========================================================
-        # ==========================================================
-        # FEATURE: Download Direct Video via System Curl
+        # FEATURE: Download Direct Video safely using curl_cffi streaming
         # ==========================================================
         if bot_start_link == "DIRECT_VIDEO":
             video_url = debug_content.strip()
-            print(f"Downloading direct video via curl from: {video_url}")
+            print(f"Downloading direct video via Python (Bypassing Cloudflare)...")
             temp_file_name = None
             
             try:
@@ -248,58 +236,62 @@ async def handler(event):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
                     temp_file_name = tmp_file.name
 
-                print("Starting system curl download...")
-                
-                # Added -f so curl fails immediately on 404/403 errors
-                command = f'curl -f -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "{temp_file_name}" "{video_url}"'
-                
-                process = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                # We use c_requests to bypass Cloudflare, but use `stream=True` 
+                # so it streams directly to disk without overloading Heroku's RAM
+                response = await loop.run_in_executor(
+                    None, 
+                    lambda: c_requests.get(video_url, impersonate="chrome110", stream=True, timeout=120)
                 )
                 
-                stdout, stderr = await process.communicate()
-                
-                if process.returncode == 0 and os.path.getsize(temp_file_name) > 1000:
-                    file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
-                    print(f"✅ Video downloaded successfully! Size: {file_size_mb:.2f} MB")
-                    print("🚀 Starting Telegram upload...")
+                if response.status_code == 200:
+                    print("Connection established. Streaming file to disk...")
                     
-                    # --- Progress tracker function ---
-                    async def upload_progress(current, total):
-                        # Prints upload percentage on the same line
-                        print(f"Uploading: {current * 100 / total:.1f}% ({current}/{total} bytes)", end='\r')
+                    def write_chunks():
+                        with open(temp_file_name, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    
+                    # Run the heavy disk-write operation async
+                    await loop.run_in_executor(None, write_chunks)
 
-                    try:
-                        # Uploading to Telegram
-                        await client.send_file(
-                            DESTINATION_CHAT, 
-                            file=temp_file_name, 
-                            caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
-                            progress_callback=upload_progress,
-                            supports_streaming=True # Helps Telegram recognize it as a streamable video
-                        )
-                        print("\n✅ Upload complete!")
-                    except Exception as upload_err:
-                        print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
-                        bot_start_link = None
-                        debug_content = f"Telegram Upload Error: {str(upload_err)}"
-                    
-                    # Clean up
-                    if os.path.exists(temp_file_name):
-                        os.remove(temp_file_name)
+                    if os.path.getsize(temp_file_name) > 1000:
+                        file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
+                        print(f"✅ Video downloaded! Size: {file_size_mb:.2f} MB")
+                        print("🚀 Starting Telegram upload...")
                         
-                    if bot_start_link == "DIRECT_VIDEO": 
-                        continue # Finished successfully, skip to next link
+                        # Upload Tracker
+                        async def upload_progress(current, total):
+                            print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
+
+                        try:
+                            await client.send_file(
+                                DESTINATION_CHAT, 
+                                file=temp_file_name, 
+                                caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
+                                progress_callback=upload_progress,
+                                supports_streaming=True
+                            )
+                            print("\n✅ Upload complete!")
+                        except Exception as upload_err:
+                            print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
+                            bot_start_link = None
+                            debug_content = f"Telegram Upload Error: {str(upload_err)}"
+                        
+                        # Clean up
+                        if os.path.exists(temp_file_name):
+                            os.remove(temp_file_name)
+                            
+                        if bot_start_link == "DIRECT_VIDEO": 
+                            continue # Finished successfully, skip to next link
+                    else:
+                        print("❌ Downloaded file was empty.")
+                        if os.path.exists(temp_file_name):
+                            os.remove(temp_file_name)
                 else:
-                    print(f"❌ Curl download failed. Return code: {process.returncode}")
-                    print(f"Curl Error Log: {stderr.decode()}")
-                    if temp_file_name and os.path.exists(temp_file_name):
-                        os.remove(temp_file_name)
-                        
+                    print(f"❌ Server rejected download. Status code: {response.status_code}")
                     bot_start_link = None
-                    debug_content = f"Failed to download direct video via curl.\nError: {stderr.decode()}"
+                    debug_content = f"Failed to download. Status code: {response.status_code}"
             
             except Exception as e:
                 print(f"❌ System Error during direct video process: {e}")
@@ -308,7 +300,6 @@ async def handler(event):
                 bot_start_link = None
                 debug_content = f"Exception downloading video: {str(e)}"
         # ==========================================================
-
 
         # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
         if not bot_start_link:
@@ -377,4 +368,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
