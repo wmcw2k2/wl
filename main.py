@@ -2,6 +2,7 @@ import os
 import re
 import io
 import asyncio
+import tempfile
 from urllib.parse import urlparse
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
@@ -20,7 +21,6 @@ SOURCE_CHATS = [
     '@Ukussapremium_bot', 
     2047350734,
     '@PremiumJil_bot'
-            
 ]
 
 DESTINATION_CHAT = -1001676677601 
@@ -59,6 +59,31 @@ def scrape_target_url(url, allowed_domains):
             
         html_content = response.text
         
+        # =========================================================
+        # NEW FEATURE: Extract Direct Video from files.fm
+        # =========================================================
+        if "files.fm" in url:
+            print("Detecting files.fm, attempting to extract direct video variables...")
+            # Extract variables from HTML
+            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
+            sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
+            
+            if img_match and sess_match:
+                file_host = img_match.group(1)
+                file_hash = img_match.group(2)
+                sess_id = sess_match.group(1)
+                
+                # Look for the ?v= timestamp, default to one if missing
+                v_match = re.search(r'\?v=(\d+)', html_content)
+                v_val = v_match.group(1) if v_match else "1771587749"
+                
+                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                
+                # Return custom flag to route logic in handler
+                return "DIRECT_VIDEO", video_url
+        # =========================================================
+
         # Regex for Telegram deep links
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
         match = re.search(tg_pattern, html_content)
@@ -149,7 +174,7 @@ def get_all_links(event):
     
     return list(urls)
 
-# --- NEW FEATURE: Command to add domains dynamically ---
+# --- Command to add domains dynamically ---
 @client.on(events.NewMessage(pattern=r'/adddomain (.*)', from_users='me'))
 async def add_domain_handler(event):
     url = event.pattern_match.group(1).strip()
@@ -190,6 +215,42 @@ async def handler(event):
         
         # Unpack the two values returned by the scraper
         bot_start_link, debug_content = scrape_result
+
+        # ==========================================================
+        # NEW FEATURE: Download Direct Video and Upload to Telegram
+        # ==========================================================
+        if bot_start_link == "DIRECT_VIDEO":
+            video_url = debug_content
+            print(f"Downloading direct video from {video_url}...")
+            
+            try:
+                # We use c_requests to spoof chrome incase the host blocks python
+                vid_response = c_requests.get(video_url, impersonate="chrome110", timeout=60)
+                
+                if vid_response.status_code == 200:
+                    # Write to a temporary file instead of pure RAM buffer for stability
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+                        temp_file_name = tmp_file.name
+                        tmp_file.write(vid_response.content)
+                        
+                    print("Video downloaded! Uploading to Destination Channel...")
+                    await client.send_file(
+                        DESTINATION_CHAT, 
+                        file=temp_file_name, 
+                        caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}"
+                    )
+                    os.remove(temp_file_name)  # Clean up storage
+                    continue # Successfully finished this link, skip to next loop iteration
+                else:
+                    print(f"Failed to download video. Status code: {vid_response.status_code}")
+                    bot_start_link = None
+                    debug_content = f"Failed to download direct video. Status code: {vid_response.status_code}"
+            
+            except Exception as e:
+                print(f"Error downloading video: {e}")
+                bot_start_link = None
+                debug_content = f"Exception downloading video: {str(e)}"
+        # ==========================================================
 
         # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
         if not bot_start_link:
@@ -257,5 +318,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-
