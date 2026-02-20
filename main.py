@@ -3,6 +3,8 @@ import re
 import io
 import asyncio
 import tempfile
+import urllib.request
+import shutil
 from urllib.parse import urlparse
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
@@ -35,39 +37,82 @@ def scrape_target_url(url, allowed_domains):
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
 
+    # 1. Use a Session to keep Cloudflare cookies alive
+    session = c_requests.Session(impersonate="chrome110")
+
     try:
-        response = c_requests.get(
-            url, 
-            impersonate="chrome110", 
-            allow_redirects=True, 
-            timeout=20
-        )
+        response = session.get(url, allow_redirects=True, timeout=20)
         
         if response.status_code == 403:
             return None, f"❌ Target actively blocked Chrome impersonation (403): {url}"
             
         html_content = response.text
-        
-        # =========================================================
-        # CHECK 1: Is the FIRST link files.fm?
-        # =========================================================
-        if "files.fm" in url:
-            print("Detecting files.fm (Step 1), attempting to extract direct video variables...")
-            
-            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
-            sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
-            
-            if img_match and sess_match:
-                file_host = img_match.group(1).strip()
-                file_hash = img_match.group(2).strip()
-                sess_id = sess_match.group(1).strip()
-                
-                # Construct the EXACT streaming URL used by the site's HTML5 <video> player
-                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&pv=1&.mp4"
-                
-                print(f"✅ Generated Files.fm Direct Player Link: {video_url}")
-                return "DIRECT_VIDEO", video_url
 
+        # =========================================================
+        # INTERNAL DOWNLOAD FUNCTION (Using Native Python)
+        # =========================================================
+        def attempt_direct_download(page_url, page_html):
+            video_url = None
+            if "files.fm" in page_url:
+                meta_match = re.search(r'property="og:image".*?content="https://([^/]+)/thumb_video_picture\.php\?i=([^"]+)"', page_html)
+                sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", page_html)
+                
+                if meta_match and sess_match:
+                    host = meta_match.group(1).strip()
+                    file_hash = meta_match.group(2).strip()
+                    sess_id = sess_match.group(1).strip()
+                    
+                    v_match = re.search(r'\.mp4\?v=(\d+)', page_html)
+                    v_val = v_match.group(1).strip() if v_match else "1771587749"
+                    
+                    video_url = f"https://{host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+
+            if video_url:
+                print(f"✅ Generated Direct Video Link: {video_url}")
+                print("⬇️ Downloading file natively to bypass HTTP/2 chunking bugs...")
+                
+                try:
+                    # Extract Cloudflare cookies from the c_requests session
+                    cookie_str = "; ".join([f"{k}={v}" for k, v in session.cookies.get_dict().items()])
+                    
+                    # Build exact browser headers
+                    req = urllib.request.Request(
+                        video_url, 
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                            'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
+                            'Referer': page_url,
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Connection': 'keep-alive',
+                            'Cookie': cookie_str
+                        }
+                    )
+                    
+                    # Download flawlessly using shutil to avoid dropped binary chunks
+                    with urllib.request.urlopen(req, timeout=120) as vid_resp:
+                        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                        shutil.copyfileobj(vid_resp, tmp_file)
+                        tmp_file.close()
+                        
+                        # Verify we didn't just download a tiny error page (Must be > 100KB)
+                        if os.path.getsize(tmp_file.name) > 100000:
+                            return "DOWNLOADED_FILE", tmp_file.name
+                        else:
+                            os.remove(tmp_file.name)
+                            print("❌ Downloaded file was too small. Likely an HTML error page.")
+                            
+                except Exception as e:
+                    print(f"❌ Exception during native download: {e}")
+                    
+            return None, None
+        # =========================================================
+
+        # CHECK 1: Is the FIRST link files.fm?
+        dl_flag, dl_path = attempt_direct_download(url, html_content)
+        if dl_flag == "DOWNLOADED_FILE":
+            return dl_flag, dl_path
+
+        # Step 2: Telegram Link logic
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
         match = re.search(tg_pattern, html_content)
         
@@ -76,7 +121,6 @@ def scrape_target_url(url, allowed_domains):
             return match.group(1), html_content
             
         print("No Telegram link found. Searching for intermediary links...")
-        
         link_pattern = r'["\'](https?://[^\'"]+)["\']'
         all_links = re.findall(link_pattern, html_content)
         
@@ -87,17 +131,11 @@ def scrape_target_url(url, allowed_domains):
                 if domain in link:
                     matched_domain = True
                     break
-            
-            if not matched_domain:
+            if not matched_domain or link.lower().endswith(IGNORED_EXTENSIONS):
                 continue
-
-            if link.lower().endswith(IGNORED_EXTENSIONS):
-                continue
-                
             if "/202" in link or ".html" in link or "/video" in link:
                 intermediary_link = link
                 break
-            
             if not intermediary_link:
                 intermediary_link = link
 
@@ -108,37 +146,17 @@ def scrape_target_url(url, allowed_domains):
         print(f"Found matching intermediary link: {intermediary_link}")
         print("Scraping intermediary page...")
         
-        response2 = c_requests.get(
-            intermediary_link, 
-            impersonate="chrome110", 
-            allow_redirects=True, 
-            timeout=20
-        )
+        response2 = session.get(intermediary_link, allow_redirects=True, timeout=20)
         
         if response2.status_code == 403:
             return None, f"❌ Intermediary page blocked us (403): {intermediary_link}"
             
         html_content = response2.text
         
-        # =========================================================
         # CHECK 2: Is the INTERMEDIARY link files.fm?
-        # =========================================================
-        if "files.fm" in intermediary_link:
-            print("Detecting files.fm (Step 3), attempting to extract direct video variables...")
-            
-            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
-            sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
-            
-            if img_match and sess_match:
-                file_host = img_match.group(1).strip()
-                file_hash = img_match.group(2).strip()
-                sess_id = sess_match.group(1).strip()
-                
-                # Construct the EXACT streaming URL used by the site's HTML5 <video> player
-                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&pv=1&.mp4"
-                
-                print(f"✅ Generated Files.fm Direct Player Link: {video_url}")
-                return "DIRECT_VIDEO", video_url
+        dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
+        if dl_flag == "DOWNLOADED_FILE":
+            return dl_flag, dl_path
 
         match2 = re.search(tg_pattern, html_content)
         if match2:
@@ -168,7 +186,6 @@ def get_all_links(event):
             elif isinstance(ent, MessageEntityUrl):
                 url_text = event.text[ent.offset : ent.offset + ent.length]
                 urls.add(url_text)
-    
     return list(urls)
 
 
@@ -210,70 +227,37 @@ async def handler(event):
         bot_start_link, debug_content = scrape_result
 
         # ==========================================================
-        # FEATURE: Download Direct Video safely
+        # DIRECT VIDEO UPLOADER
         # ==========================================================
-        if bot_start_link == "DIRECT_VIDEO":
-            video_url = debug_content.strip()
-            print(f"Downloading direct video via Python...")
-            temp_file_name = None
+        if bot_start_link == "DOWNLOADED_FILE":
+            temp_file_name = debug_content
+            file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
+            print(f"✅ Local download complete! Size: {file_size_mb:.2f} MB")
+            print("🚀 Starting Telegram upload...")
             
+            async def upload_progress(current, total):
+                print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
+
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-                    temp_file_name = tmp_file.name
-
-                # Grab the raw bytes directly without chunking bugs
-                response = await loop.run_in_executor(
-                    None, 
-                    lambda: c_requests.get(video_url, impersonate="chrome110", timeout=120)
+                await client.send_file(
+                    DESTINATION_CHAT, 
+                    file=temp_file_name, 
+                    caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
+                    progress_callback=upload_progress,
+                    supports_streaming=True
                 )
-                
-                if response.status_code == 200:
-                    # Write all bytes to file perfectly
-                    with open(temp_file_name, 'wb') as f:
-                        f.write(response.content)
-
-                    if os.path.getsize(temp_file_name) > 1000:
-                        file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
-                        print(f"✅ Video downloaded! Size: {file_size_mb:.2f} MB")
-                        print("🚀 Starting Telegram upload...")
-                        
-                        async def upload_progress(current, total):
-                            print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
-
-                        try:
-                            await client.send_file(
-                                DESTINATION_CHAT, 
-                                file=temp_file_name, 
-                                caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
-                                progress_callback=upload_progress,
-                                supports_streaming=True
-                            )
-                            print("\n✅ Upload complete!")
-                        except Exception as upload_err:
-                            print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
-                            bot_start_link = None
-                            debug_content = f"Telegram Upload Error: {str(upload_err)}"
-                        
-                        if os.path.exists(temp_file_name):
-                            os.remove(temp_file_name)
-                            
-                        if bot_start_link == "DIRECT_VIDEO": 
-                            continue 
-                    else:
-                        print("❌ Downloaded file was empty or corrupted.")
-                        if os.path.exists(temp_file_name):
-                            os.remove(temp_file_name)
-                else:
-                    print(f"❌ Server rejected download. Status code: {response.status_code}")
-                    bot_start_link = None
-                    debug_content = f"Failed to download. Status code: {response.status_code}"
-            
-            except Exception as e:
-                print(f"❌ System Error during direct video process: {e}")
-                if temp_file_name and os.path.exists(temp_file_name):
-                    os.remove(temp_file_name)
+                print("\n✅ Upload complete!")
+            except Exception as upload_err:
+                print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
                 bot_start_link = None
-                debug_content = f"Exception downloading video: {str(e)}"
+                debug_content = f"Telegram Upload Error: {str(upload_err)}"
+            
+            # Clean up the file from Heroku storage
+            if os.path.exists(temp_file_name):
+                os.remove(temp_file_name)
+                
+            if bot_start_link == "DOWNLOADED_FILE": 
+                continue 
 
         # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
         if not bot_start_link:
