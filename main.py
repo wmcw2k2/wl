@@ -27,7 +27,7 @@ DESTINATION_CHAT = -1001676677601
 
 # Default domains to search for if the direct Telegram link isn't found.
 # These will survive Heroku restarts.
-DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize"]
+DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm"]
 # =================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -257,4 +257,5 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
 
