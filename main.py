@@ -10,7 +10,6 @@ from telethon.sessions import StringSession
 from curl_cffi import requests as c_requests
 
 # ================= CONFIGURATION =================
-# Pulled from Heroku Environment Variables
 API_ID = int(os.environ.get('API_ID', '0')) 
 API_HASH = os.environ.get('API_HASH', '')
 SESSION_STRING = os.environ.get('SESSION_STRING', '')
@@ -32,16 +31,11 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
 
 def scrape_target_url(url, allowed_domains):
-    """
-    Two-step scraper using curl_cffi.
-    Returns a tuple: (extracted_link, html_content_for_debugging)
-    """
     print(f"Scraping URL: {url}")
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
 
     try:
-        # Step 1: Scrape the first page
         response = c_requests.get(
             url, 
             impersonate="chrome110", 
@@ -60,23 +54,20 @@ def scrape_target_url(url, allowed_domains):
         if "files.fm" in url:
             print("Detecting files.fm (Step 1), attempting to extract direct video variables...")
             
-            # Extract the actual original file download link instead of the thumb_video preview
-            down_match = re.search(r'https://([^/]+)/down\.php\?i=([^&"\'\s]+)&n=([^"\'\s]+)', html_content)
+            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
-            if down_match and sess_match:
-                file_host = down_match.group(1).strip()
-                file_hash = down_match.group(2).strip()
-                file_name = down_match.group(3).strip()
+            if img_match and sess_match:
+                file_host = img_match.group(1).strip()
+                file_hash = img_match.group(2).strip()
                 sess_id = sess_match.group(1).strip()
                 
-                # Construct the official, authenticated download URL
-                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&n={file_name}"
+                # Construct the EXACT streaming URL used by the site's HTML5 <video> player
+                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&pv=1&.mp4"
                 
-                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                print(f"✅ Generated Files.fm Direct Player Link: {video_url}")
                 return "DIRECT_VIDEO", video_url
 
-        # Regex for Telegram deep links
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
         match = re.search(tg_pattern, html_content)
         
@@ -84,7 +75,6 @@ def scrape_target_url(url, allowed_domains):
             print("✅ Found Telegram link on the FIRST page!")
             return match.group(1), html_content
             
-        # Step 2: Telegram link not found. Look for an intermediary link.
         print("No Telegram link found. Searching for intermediary links...")
         
         link_pattern = r'["\'](https?://[^\'"]+)["\']'
@@ -115,7 +105,6 @@ def scrape_target_url(url, allowed_domains):
             print("❌ Failed: No valid intermediary links matched our domain list.")
             return None, html_content
             
-        # Step 3: Scrape the intermediary page
         print(f"Found matching intermediary link: {intermediary_link}")
         print("Scraping intermediary page...")
         
@@ -137,18 +126,18 @@ def scrape_target_url(url, allowed_domains):
         if "files.fm" in intermediary_link:
             print("Detecting files.fm (Step 3), attempting to extract direct video variables...")
             
-            down_match = re.search(r'https://([^/]+)/down\.php\?i=([^&"\'\s]+)&n=([^"\'\s]+)', html_content)
+            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
-            if down_match and sess_match:
-                file_host = down_match.group(1).strip()
-                file_hash = down_match.group(2).strip()
-                file_name = down_match.group(3).strip()
+            if img_match and sess_match:
+                file_host = img_match.group(1).strip()
+                file_hash = img_match.group(2).strip()
                 sess_id = sess_match.group(1).strip()
                 
-                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&n={file_name}"
+                # Construct the EXACT streaming URL used by the site's HTML5 <video> player
+                video_url = f"https://{file_host}/down.php?i={file_hash}&PHPSESSID={sess_id}&pv=1&.mp4"
                 
-                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                print(f"✅ Generated Files.fm Direct Player Link: {video_url}")
                 return "DIRECT_VIDEO", video_url
 
         match2 = re.search(tg_pattern, html_content)
@@ -165,7 +154,6 @@ def scrape_target_url(url, allowed_domains):
 
 
 def get_all_links(event):
-    """ Extracts ALL URLs from a message """
     urls = set()
     if event.message.buttons:
         for row in event.message.buttons:
@@ -184,7 +172,6 @@ def get_all_links(event):
     return list(urls)
 
 
-# --- Command to add domains dynamically ---
 @client.on(events.NewMessage(pattern=r'/adddomain (.*)', from_users='me'))
 async def add_domain_handler(event):
     url = event.pattern_match.group(1).strip()
@@ -203,7 +190,6 @@ async def add_domain_handler(event):
         await event.reply(f"❌ Error parsing link: {e}")
 
 
-# --- Main Link Handler ---
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
 async def handler(event):
     chat = await event.get_chat()
@@ -224,43 +210,33 @@ async def handler(event):
         bot_start_link, debug_content = scrape_result
 
         # ==========================================================
-        # FEATURE: Download Direct Video safely using curl_cffi streaming
+        # FEATURE: Download Direct Video safely
         # ==========================================================
         if bot_start_link == "DIRECT_VIDEO":
             video_url = debug_content.strip()
-            print(f"Downloading direct video via Python (Bypassing Cloudflare)...")
+            print(f"Downloading direct video via Python...")
             temp_file_name = None
             
             try:
-                # Create a temporary file path
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
                     temp_file_name = tmp_file.name
 
-                # We use c_requests to bypass Cloudflare, but use `stream=True` 
-                # so it streams directly to disk without overloading Heroku's RAM
+                # Grab the raw bytes directly without chunking bugs
                 response = await loop.run_in_executor(
                     None, 
-                    lambda: c_requests.get(video_url, impersonate="chrome110", stream=True, timeout=120)
+                    lambda: c_requests.get(video_url, impersonate="chrome110", timeout=120)
                 )
                 
                 if response.status_code == 200:
-                    print("Connection established. Streaming file to disk...")
-                    
-                    def write_chunks():
-                        with open(temp_file_name, 'wb') as f:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                if chunk:
-                                    f.write(chunk)
-                                    
-                    # Run the heavy disk-write operation async
-                    await loop.run_in_executor(None, write_chunks)
+                    # Write all bytes to file perfectly
+                    with open(temp_file_name, 'wb') as f:
+                        f.write(response.content)
 
                     if os.path.getsize(temp_file_name) > 1000:
                         file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
                         print(f"✅ Video downloaded! Size: {file_size_mb:.2f} MB")
                         print("🚀 Starting Telegram upload...")
                         
-                        # Upload Tracker
                         async def upload_progress(current, total):
                             print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
 
@@ -278,14 +254,13 @@ async def handler(event):
                             bot_start_link = None
                             debug_content = f"Telegram Upload Error: {str(upload_err)}"
                         
-                        # Clean up
                         if os.path.exists(temp_file_name):
                             os.remove(temp_file_name)
                             
                         if bot_start_link == "DIRECT_VIDEO": 
-                            continue # Finished successfully, skip to next link
+                            continue 
                     else:
-                        print("❌ Downloaded file was empty.")
+                        print("❌ Downloaded file was empty or corrupted.")
                         if os.path.exists(temp_file_name):
                             os.remove(temp_file_name)
                 else:
@@ -299,7 +274,6 @@ async def handler(event):
                     os.remove(temp_file_name)
                 bot_start_link = None
                 debug_content = f"Exception downloading video: {str(e)}"
-        # ==========================================================
 
         # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
         if not bot_start_link:
@@ -316,7 +290,6 @@ async def handler(event):
                 
             continue 
 
-        # If it's a telegram deep link, interact with the bot
         parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
         parsed = re.search(parse_pattern, bot_start_link)
 
@@ -360,7 +333,6 @@ async def handler(event):
         await asyncio.sleep(2)
 
 
-# --- STARTUP LOGIC ---
 async def main():
     print("Starting bot...")
     await client.start()
