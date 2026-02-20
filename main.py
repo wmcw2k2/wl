@@ -235,6 +235,9 @@ async def handler(event):
         # ==========================================================
         # FEATURE: Download Direct Video via System Curl
         # ==========================================================
+        # ==========================================================
+        # FEATURE: Download Direct Video via System Curl
+        # ==========================================================
         if bot_start_link == "DIRECT_VIDEO":
             video_url = debug_content.strip()
             print(f"Downloading direct video via curl from: {video_url}")
@@ -247,8 +250,8 @@ async def handler(event):
 
                 print("Starting system curl download...")
                 
-                # Wrap URL in quotes so bash doesn't split on '&'
-                command = f'curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "{temp_file_name}" "{video_url}"'
+                # Added -f so curl fails immediately on 404/403 errors
+                command = f'curl -f -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "{temp_file_name}" "{video_url}"'
                 
                 process = await asyncio.create_subprocess_shell(
                     command,
@@ -258,20 +261,40 @@ async def handler(event):
                 
                 stdout, stderr = await process.communicate()
                 
-                # Verify successful download and non-empty file
                 if process.returncode == 0 and os.path.getsize(temp_file_name) > 1000:
-                    print("Video downloaded successfully via curl! Uploading to Telegram...")
+                    file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
+                    print(f"✅ Video downloaded successfully! Size: {file_size_mb:.2f} MB")
+                    print("🚀 Starting Telegram upload...")
                     
-                    await client.send_file(
-                        DESTINATION_CHAT, 
-                        file=temp_file_name, 
-                        caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}"
-                    )
+                    # --- Progress tracker function ---
+                    async def upload_progress(current, total):
+                        # Prints upload percentage on the same line
+                        print(f"Uploading: {current * 100 / total:.1f}% ({current}/{total} bytes)", end='\r')
+
+                    try:
+                        # Uploading to Telegram
+                        await client.send_file(
+                            DESTINATION_CHAT, 
+                            file=temp_file_name, 
+                            caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
+                            progress_callback=upload_progress,
+                            supports_streaming=True # Helps Telegram recognize it as a streamable video
+                        )
+                        print("\n✅ Upload complete!")
+                    except Exception as upload_err:
+                        print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
+                        bot_start_link = None
+                        debug_content = f"Telegram Upload Error: {str(upload_err)}"
                     
-                    os.remove(temp_file_name)  # Clean up storage
-                    continue # Finished successfully, skip to next link
+                    # Clean up
+                    if os.path.exists(temp_file_name):
+                        os.remove(temp_file_name)
+                        
+                    if bot_start_link == "DIRECT_VIDEO": 
+                        continue # Finished successfully, skip to next link
                 else:
-                    print(f"Curl download failed or file is empty. Return code: {process.returncode}")
+                    print(f"❌ Curl download failed. Return code: {process.returncode}")
+                    print(f"Curl Error Log: {stderr.decode()}")
                     if temp_file_name and os.path.exists(temp_file_name):
                         os.remove(temp_file_name)
                         
@@ -279,7 +302,7 @@ async def handler(event):
                     debug_content = f"Failed to download direct video via curl.\nError: {stderr.decode()}"
             
             except Exception as e:
-                print(f"Error downloading video: {e}")
+                print(f"❌ System Error during direct video process: {e}")
                 if temp_file_name and os.path.exists(temp_file_name):
                     os.remove(temp_file_name)
                 bot_start_link = None
@@ -354,3 +377,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
