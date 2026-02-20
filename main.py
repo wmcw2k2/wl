@@ -11,9 +11,9 @@ from curl_cffi import requests as c_requests
 
 # ================= CONFIGURATION =================
 # Pulled from Heroku Environment Variables
-API_ID = int(os.environ.get('API_ID'))
-API_HASH = os.environ.get('API_HASH')
-SESSION_STRING = os.environ.get('SESSION_STRING')
+API_ID = int(os.environ.get('API_ID', '0')) # Default to 0 to prevent crash if missing locally
+API_HASH = os.environ.get('API_HASH', '')
+SESSION_STRING = os.environ.get('SESSION_STRING', '')
 
 SOURCE_CHATS = [
     -1003514128213,  
@@ -26,7 +26,6 @@ SOURCE_CHATS = [
 DESTINATION_CHAT = -1001676677601 
 
 # Default domains to search for if the direct Telegram link isn't found.
-# These will survive Heroku restarts.
 DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm"]
 # =================================================
 
@@ -60,10 +59,10 @@ def scrape_target_url(url, allowed_domains):
         html_content = response.text
         
         # =========================================================
-        # Check if the First Link is directly a files.fm link
+        # CHECK 1: Is the FIRST link files.fm?
         # =========================================================
         if "files.fm" in url:
-            print("Detecting files.fm, attempting to extract direct video variables...")
+            print("Detecting files.fm (Step 1), attempting to extract direct video variables...")
             img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
@@ -75,20 +74,11 @@ def scrape_target_url(url, allowed_domains):
                 v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
                 v_val = v_match.group(1).strip() if v_match else "1771587749"
                 
-                # Create the base URL WITHOUT the ? and &
-                base_video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4"
+                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+                video_url = video_url.strip()
                 
-                # Put the variables in a dictionary
-                url_params = {
-                    "v": v_val,
-                    "PHPSESSID": sess_id
-                }
-                
-                print(f"✅ Extracted Files.fm Video: {base_video_url}")
-                
-                # Return the base URL and the dictionary safely
-                return "DIRECT_VIDEO", (base_video_url, url_params)
-        # =========================================================
+                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                return "DIRECT_VIDEO", video_url
 
         # Regex for Telegram deep links
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
@@ -118,7 +108,7 @@ def scrape_target_url(url, allowed_domains):
             if link.lower().endswith(IGNORED_EXTENSIONS):
                 continue
                 
-            if "/202" in link or ".html" in link or "/video" in link or "files.fm" in link:
+            if "/202" in link or ".html" in link or "/video" in link:
                 intermediary_link = link
                 break
             
@@ -146,11 +136,10 @@ def scrape_target_url(url, allowed_domains):
         html_content = response2.text
         
         # =========================================================
-        # Check if the Intermediary Link is a files.fm link
+        # CHECK 2: Is the INTERMEDIARY link files.fm?
         # =========================================================
         if "files.fm" in intermediary_link:
-            print("Detecting files.fm on intermediary page, attempting to extract direct video variables...")
-            
+            print("Detecting files.fm (Step 3), attempting to extract direct video variables...")
             img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
@@ -162,21 +151,12 @@ def scrape_target_url(url, allowed_domains):
                 v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
                 v_val = v_match.group(1).strip() if v_match else "1771587749"
                 
-                # Create the base URL WITHOUT the ? and &
-                base_video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4"
+                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+                video_url = video_url.strip()
                 
-                # Put the variables in a dictionary
-                url_params = {
-                    "v": v_val,
-                    "PHPSESSID": sess_id
-                }
-                
-                print(f"✅ Extracted Files.fm Video: {base_video_url}")
-                
-                # Return the base URL and the dictionary safely
-                return "DIRECT_VIDEO", (base_video_url, url_params)
-        # =========================================================
-        
+                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                return "DIRECT_VIDEO", video_url
+
         match2 = re.search(tg_pattern, html_content)
         if match2:
             print("✅ Found Telegram link on the SECOND page!")
@@ -188,6 +168,7 @@ def scrape_target_url(url, allowed_domains):
     except Exception as e:
         print(f"❌ Error scraping URL: {e}")
         return None, f"Error Exception: {str(e)}\n\nLast HTML extracted:\n{html_content}"
+
 
 def get_all_links(event):
     """ Extracts ALL URLs from a message (Inline Buttons + Text Hyperlinks) """
@@ -207,6 +188,7 @@ def get_all_links(event):
                 urls.add(url_text)
     
     return list(urls)
+
 
 # --- Command to add domains dynamically ---
 @client.on(events.NewMessage(pattern=r'/adddomain (.*)', from_users='me'))
@@ -229,6 +211,7 @@ async def add_domain_handler(event):
     except Exception as e:
         await event.reply(f"❌ Error parsing link: {e}")
 
+
 # --- Main Link Handler ---
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
 async def handler(event):
@@ -250,51 +233,59 @@ async def handler(event):
         bot_start_link, debug_content = scrape_result
 
         # ==========================================================
-        # Download Direct Video and Upload to Telegram
+        # FEATURE: Download Direct Video via System Curl
         # ==========================================================
         if bot_start_link == "DIRECT_VIDEO":
-            # Unpack the base URL and the dictionary of parameters
-            base_video_url, url_params = debug_content 
-            
-            print(f"Downloading direct video safely using params...")
+            video_url = debug_content.strip()
+            print(f"Downloading direct video via curl from: {video_url}")
+            temp_file_name = None
             
             try:
-                # By passing 'params=url_params', Python handles the ? and & 
-                # safely so the URL never gets cut off!
-                vid_response = c_requests.get(
-                    base_video_url, 
-                    params=url_params, 
-                    impersonate="chrome110", 
-                    timeout=60
+                # Create a temporary file path
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+                    temp_file_name = tmp_file.name
+
+                print("Starting system curl download...")
+                
+                # Wrap URL in quotes so bash doesn't split on '&'
+                command = f'curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o "{temp_file_name}" "{video_url}"'
+                
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
                 )
                 
-                if vid_response.status_code == 200:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-                        temp_file_name = tmp_file.name
-                        tmp_file.write(vid_response.content)
-                        
-                    print("Video downloaded! Uploading to Destination Channel...")
-                    
-                    # We can manually reconstruct it for the caption if we want to show it
-                    caption_url = f"{base_video_url}?v={url_params['v']}&PHPSESSID={url_params['PHPSESSID']}"
+                stdout, stderr = await process.communicate()
+                
+                # Verify successful download and non-empty file
+                if process.returncode == 0 and os.path.getsize(temp_file_name) > 1000:
+                    print("Video downloaded successfully via curl! Uploading to Telegram...")
                     
                     await client.send_file(
                         DESTINATION_CHAT, 
                         file=temp_file_name, 
                         caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}"
                     )
+                    
                     os.remove(temp_file_name)  # Clean up storage
-                    continue 
+                    continue # Finished successfully, skip to next link
                 else:
-                    print(f"Failed to download video. Status code: {vid_response.status_code}")
+                    print(f"Curl download failed or file is empty. Return code: {process.returncode}")
+                    if temp_file_name and os.path.exists(temp_file_name):
+                        os.remove(temp_file_name)
+                        
                     bot_start_link = None
-                    debug_content = f"Failed to download direct video. Status code: {vid_response.status_code}"
+                    debug_content = f"Failed to download direct video via curl.\nError: {stderr.decode()}"
             
             except Exception as e:
                 print(f"Error downloading video: {e}")
+                if temp_file_name and os.path.exists(temp_file_name):
+                    os.remove(temp_file_name)
                 bot_start_link = None
                 debug_content = f"Exception downloading video: {str(e)}"
         # ==========================================================
+
 
         # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
         if not bot_start_link:
@@ -302,7 +293,6 @@ async def handler(event):
             caption = f"❌ **Extraction Failed**\nCould not find a valid link inside:\n{url_to_visit}"
             
             if debug_content:
-                # Create an in-memory file to avoid Heroku storage issues
                 debug_file = io.BytesIO(debug_content.encode('utf-8'))
                 debug_file.name = "debug_page_source.txt"
                 
@@ -312,6 +302,7 @@ async def handler(event):
                 
             continue 
 
+        # If it's a telegram deep link, interact with the bot
         parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
         parsed = re.search(parse_pattern, bot_start_link)
 
@@ -354,6 +345,7 @@ async def handler(event):
         
         await asyncio.sleep(2)
 
+
 # --- STARTUP LOGIC ---
 async def main():
     print("Starting bot...")
@@ -362,6 +354,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-
-
