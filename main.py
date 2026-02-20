@@ -60,11 +60,10 @@ def scrape_target_url(url, allowed_domains):
         html_content = response.text
         
         # =========================================================
-        # NEW FEATURE: Extract Direct Video from files.fm
+        # Check if the First Link is directly a files.fm link
         # =========================================================
         if "files.fm" in url:
             print("Detecting files.fm, attempting to extract direct video variables...")
-            # Extract variables from HTML
             img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
             sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
             
@@ -73,14 +72,12 @@ def scrape_target_url(url, allowed_domains):
                 file_hash = img_match.group(2)
                 sess_id = sess_match.group(1)
                 
-                # Look for the ?v= timestamp, default to one if missing
                 v_match = re.search(r'\?v=(\d+)', html_content)
                 v_val = v_match.group(1) if v_match else "1771587749"
                 
                 video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
                 print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
                 
-                # Return custom flag to route logic in handler
                 return "DIRECT_VIDEO", video_url
         # =========================================================
 
@@ -100,7 +97,6 @@ def scrape_target_url(url, allowed_domains):
         
         intermediary_link = None
         for link in all_links:
-            # Check 1: Does it match our domain?
             matched_domain = False
             for domain in allowed_domains:
                 if domain in link:
@@ -110,16 +106,13 @@ def scrape_target_url(url, allowed_domains):
             if not matched_domain:
                 continue
 
-            # Check 2: Is it a junk file (favicon, image, css)?
             if link.lower().endswith(IGNORED_EXTENSIONS):
                 continue
                 
-            # Check 3 (Optional): Prioritize links that look like posts
-            if "/202" in link or ".html" in link or "/video" in link:
+            if "/202" in link or ".html" in link or "/video" in link or "files.fm" in link:
                 intermediary_link = link
                 break
             
-            # Keep as backup if not a "perfect" match
             if not intermediary_link:
                 intermediary_link = link
 
@@ -142,6 +135,29 @@ def scrape_target_url(url, allowed_domains):
             return None, f"❌ Intermediary page blocked us (403): {intermediary_link}"
             
         html_content = response2.text
+        
+        # =========================================================
+        # Check if the Intermediary Link is a files.fm link
+        # =========================================================
+        if "files.fm" in intermediary_link:
+            print("Detecting files.fm on intermediary page, attempting to extract direct video variables...")
+            
+            img_match = re.search(r'https://([^/]+)/thumb_video_picture\.php\?i=([^"\']+)', html_content)
+            sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", html_content)
+            
+            if img_match and sess_match:
+                file_host = img_match.group(1)
+                file_hash = img_match.group(2)
+                sess_id = sess_match.group(1)
+                
+                v_match = re.search(r'\?v=(\d+)', html_content)
+                v_val = v_match.group(1) if v_match else "1771587749"
+                
+                video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+                print(f"✅ Generated Files.fm Direct Video Link: {video_url}")
+                
+                return "DIRECT_VIDEO", video_url
+        # =========================================================
         
         match2 = re.search(tg_pattern, html_content)
         if match2:
@@ -213,11 +229,10 @@ async def handler(event):
         loop = asyncio.get_running_loop()
         scrape_result = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
         
-        # Unpack the two values returned by the scraper
         bot_start_link, debug_content = scrape_result
 
         # ==========================================================
-        # NEW FEATURE: Download Direct Video and Upload to Telegram
+        # Download Direct Video and Upload to Telegram
         # ==========================================================
         if bot_start_link == "DIRECT_VIDEO":
             video_url = debug_content
@@ -225,7 +240,7 @@ async def handler(event):
             
             try:
                 # We use c_requests to spoof chrome incase the host blocks python
-                vid_response = c_requests.get(video_url, impersonate="chrome110", timeout=60)
+                vid_response = c_requests.get(video_url, impersonate="chrome110", timeout=120)
                 
                 if vid_response.status_code == 200:
                     # Write to a temporary file instead of pure RAM buffer for stability
@@ -240,6 +255,7 @@ async def handler(event):
                         caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}"
                     )
                     os.remove(temp_file_name)  # Clean up storage
+                    print("Upload complete and temp file removed.")
                     continue # Successfully finished this link, skip to next loop iteration
                 else:
                     print(f"Failed to download video. Status code: {vid_response.status_code}")
