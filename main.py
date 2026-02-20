@@ -72,7 +72,7 @@ def scrape_target_url(url, allowed_domains):
                 file_hash = img_match.group(2)
                 sess_id = sess_match.group(1)
                 
-                v_match = re.search(r'\?v=(\d+)', html_content)
+                v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
                 v_val = v_match.group(1) if v_match else "1771587749"
                 
                 video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
@@ -150,7 +150,7 @@ def scrape_target_url(url, allowed_domains):
                 file_hash = img_match.group(2)
                 sess_id = sess_match.group(1)
                 
-                v_match = re.search(r'\?v=(\d+)', html_content)
+                v_match = re.search(r'\.mp4\?v=(\d+)', html_content)
                 v_val = v_match.group(1) if v_match else "1771587749"
                 
                 video_url = f"https://{file_host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
@@ -334,3 +334,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
