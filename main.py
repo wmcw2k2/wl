@@ -19,6 +19,7 @@ SESSION_STRING = os.environ.get('SESSION_STRING', '')
 SOURCE_CHATS = [
     -1003514128213,  
     -1002634794692,  
+    -1002345296875,
     '@Ukussapremium_bot', 
     2047350734,
     '@PremiumJil_bot'
