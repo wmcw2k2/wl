@@ -255,10 +255,9 @@ async def add_domain_handler(event):
 
 
 # ====================================================================
-# NEW FEATURE: Background Task Processor for Parallel Link Handling
+# Background Task Processor
 # ====================================================================
 async def process_single_link(url_to_visit, chat_name):
-    """Processes a single URL independently so the main event loop isn't blocked."""
     print(f"\nProcessing Link: {url_to_visit}")
 
     loop = asyncio.get_running_loop()
@@ -289,14 +288,11 @@ async def process_single_link(url_to_visit, chat_name):
             print("\n✅ Upload complete!")
         except Exception as upload_err:
             print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
-            bot_start_link = None
-            debug_content = f"Telegram Upload Error: {str(upload_err)}"
-        
+            
         if os.path.exists(temp_file_name):
             os.remove(temp_file_name)
             
-        if bot_start_link == "DOWNLOADED_FILE": 
-            return 
+        return 
 
     # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
     if not bot_start_link:
@@ -313,7 +309,7 @@ async def process_single_link(url_to_visit, chat_name):
         return 
 
     # ==========================================================
-    # BOT CONVERSATION HANDLER (Smart checking for Videos/Docs)
+    # BOT CONVERSATION HANDLER (Smart Restrict/Forward Bypass)
     # ==========================================================
     parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
     parsed = re.search(parse_pattern, bot_start_link)
@@ -327,42 +323,74 @@ async def process_single_link(url_to_visit, chat_name):
             async with client.conversation(bot_username, timeout=30) as conv:
                 await conv.send_message(f"/start {start_token}")
                 
-                # Listen to up to 10 sequential messages to find the video
                 target_video_msg = None
+                
+                # Listen to up to 10 sequential messages to find the video
                 for _ in range(10):
                     try:
-                        # Wait 10 seconds for each message chunk
-                        response = await conv.get_response(timeout=10)
+                        # Increased to 20 seconds. Some bots are slow to generate/upload!
+                        response = await conv.get_response(timeout=20)
                         
-                        # Only accept it if it's explicitly a Video or a Document
-                        # (Ignores welcome photos, ad banners, and plain text)
+                        # Debugging line to see exactly what the bot is sending
+                        media_type = type(response.media).__name__ if response.media else "No Media"
+                        print(f"[{bot_username}] Got msg: '{response.text[:20]}...' | Media: {media_type}")
+                        
+                        # Look explicitly for video or document
                         if response.video or response.document:
                             target_video_msg = response
                             break 
                     except asyncio.TimeoutError:
-                        break # Stop checking if the bot stops talking
+                        print(f"[{bot_username}] Finished waiting for new messages.")
+                        break 
 
                 if target_video_msg:
-                    print(f"✅ Video received from @{bot_username}! Forwarding...")
-                    await client.send_file(
-                        DESTINATION_CHAT, 
-                        target_video_msg.media, 
-                        caption=f"Extracted from {chat_name}"
-                    )
+                    print(f"✅ Video found from @{bot_username}! Attempting to forward...")
+                    
+                    try:
+                        # Try forwarding directly first (Fastest)
+                        await client.send_message(DESTINATION_CHAT, message=target_video_msg)
+                        print(f"✅ Successfully forwarded to destination!")
+                    except Exception as forward_err:
+                        # If forward fails, the bot likely has protect_content=True enabled
+                        print(f"⚠️ Direct forward failed ({forward_err}). Bot likely restricts forwarding.")
+                        print("⬇️ Falling back to manual download & re-upload to bypass restriction...")
+                        
+                        temp_path = None
+                        try:
+                            # Create temporary file
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+                                temp_path = tmp_file.name
+                                
+                            # Download video from the bot locally
+                            await client.download_media(target_video_msg, file=temp_path)
+                            
+                            print("🚀 Download complete. Uploading to destination channel...")
+                            
+                            async def bot_upload_progress(current, total):
+                                print(f"Uploading bypassed video: {current * 100 / total:.1f}%", end='\r')
+                                
+                            await client.send_file(
+                                DESTINATION_CHAT, 
+                                file=temp_path, 
+                                caption=f"Extracted from {chat_name}\nBot: @{bot_username}",
+                                progress_callback=bot_upload_progress,
+                                supports_streaming=True
+                            )
+                            print("\n✅ Manual upload complete!")
+                        except Exception as manual_err:
+                            print(f"\n❌ Manual download/upload also failed: {manual_err}")
+                        finally:
+                            # Clean up the Heroku storage
+                            if temp_path and os.path.exists(temp_path):
+                                os.remove(temp_path)
                 else:
-                    print("❌ Bot replied, but did not send a video or document file.")
+                    print(f"❌ @{bot_username} did not send a video file.")
                     await client.send_message(
                         'me', 
                         f"⚠️ **Target Bot Failed**\n@{bot_username} did not send a video for link:\n{url_to_visit}"
                     )
-        except asyncio.TimeoutError:
-             print("Conversation timed out.")
-             await client.send_message(
-                 'me', 
-                 f"⏱ **Timeout**\n@{bot_username} took too long to respond for link:\n{url_to_visit}"
-             )
         except Exception as e:
-            print(f"Conversation failed: {e}")
+            print(f"Conversation with @{bot_username} failed: {e}")
 
 
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
