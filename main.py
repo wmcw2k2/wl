@@ -29,7 +29,6 @@ SOURCE_CHATS = [
 
 DESTINATION_CHAT = -1001676677601 
 
-# Added kozow.com so it automatically recognizes sepalanthaya links
 DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm", "kozow.com"]
 # =================================================
 
@@ -41,7 +40,6 @@ def scrape_target_url(url, allowed_domains):
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
 
-    # 1. Use a Session to keep Cloudflare cookies alive
     session = c_requests.Session(impersonate="chrome110")
 
     try:
@@ -53,7 +51,7 @@ def scrape_target_url(url, allowed_domains):
         html_content = response.text
 
         # =========================================================
-        # INTERNAL JS MAP EXTRACTOR (For Sepalanthaya locker pages)
+        # INTERNAL JS MAP EXTRACTOR
         # =========================================================
         def attempt_js_map_extract(page_url, page_html):
             if "${code}" in page_html and "t.me/" in page_html:
@@ -67,16 +65,14 @@ def scrape_target_url(url, allowed_domains):
                     
                     if 'p' in query_params:
                         raw_param = query_params['p'][0]
-                        final_code = raw_param # Fallback to raw param
+                        final_code = raw_param 
                         
                         try:
-                            # Fetch obfuscatedMap.js based on current URL path
                             base_path = page_url.split('?')[0].rsplit('/', 1)[0]
                             map_url = f"{base_path}/obfuscatedMap.js"
                             
                             map_resp = session.get(map_url, timeout=10)
                             if map_resp.status_code == 200:
-                                # Find the mapped value for our param
                                 map_match = re.search(rf'["\']{re.escape(raw_param)}["\']\s*:\s*["\']([^"\']+)["\']', map_resp.text)
                                 if map_match:
                                     final_code = map_match.group(1)
@@ -90,7 +86,7 @@ def scrape_target_url(url, allowed_domains):
             return None
 
         # =========================================================
-        # INTERNAL DOWNLOAD FUNCTION (Using Native Python)
+        # INTERNAL DOWNLOAD FUNCTION
         # =========================================================
         def attempt_direct_download(page_url, page_html):
             video_url = None
@@ -254,6 +250,117 @@ async def add_domain_handler(event):
         await event.reply(f"❌ Error parsing link: {e}")
 
 
+# ====================================================================
+# NEW FEATURE: Background Task Processor for Parallel Link Handling
+# ====================================================================
+async def process_single_link(url_to_visit, chat_name):
+    """Processes a single URL independently so the main event loop isn't blocked."""
+    print(f"\nProcessing Link: {url_to_visit}")
+
+    loop = asyncio.get_running_loop()
+    scrape_result = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
+    
+    bot_start_link, debug_content = scrape_result
+
+    # ==========================================================
+    # DIRECT VIDEO UPLOADER
+    # ==========================================================
+    if bot_start_link == "DOWNLOADED_FILE":
+        temp_file_name = debug_content
+        file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
+        print(f"✅ Local download complete! Size: {file_size_mb:.2f} MB")
+        print("🚀 Starting Telegram upload...")
+        
+        async def upload_progress(current, total):
+            print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
+
+        try:
+            await client.send_file(
+                DESTINATION_CHAT, 
+                file=temp_file_name, 
+                caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
+                progress_callback=upload_progress,
+                supports_streaming=True
+            )
+            print("\n✅ Upload complete!")
+        except Exception as upload_err:
+            print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
+            bot_start_link = None
+            debug_content = f"Telegram Upload Error: {str(upload_err)}"
+        
+        if os.path.exists(temp_file_name):
+            os.remove(temp_file_name)
+            
+        if bot_start_link == "DOWNLOADED_FILE": 
+            return 
+
+    # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
+    if not bot_start_link:
+        print("Failed to get link. Sending debug HTML to Saved Messages...")
+        caption = f"❌ **Extraction Failed**\nCould not find a valid link inside:\n{url_to_visit}"
+        
+        if debug_content:
+            debug_file = io.BytesIO(debug_content.encode('utf-8'))
+            debug_file.name = "debug_page_source.txt"
+            await client.send_file('me', file=debug_file, caption=caption)
+        else:
+            await client.send_message('me', caption + "\n\n(No HTML content was retrieved)")
+            
+        return 
+
+    # ==========================================================
+    # BOT CONVERSATION HANDLER (Smart checking for Videos/Docs)
+    # ==========================================================
+    parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
+    parsed = re.search(parse_pattern, bot_start_link)
+
+    if parsed:
+        bot_username = parsed.group(1)
+        start_token = parsed.group(2)
+
+        try:
+            print(f"Interacting with @{bot_username}...")
+            async with client.conversation(bot_username, timeout=30) as conv:
+                await conv.send_message(f"/start {start_token}")
+                
+                # Listen to up to 10 sequential messages to find the video
+                target_video_msg = None
+                for _ in range(10):
+                    try:
+                        # Wait 10 seconds for each message chunk
+                        response = await conv.get_response(timeout=10)
+                        
+                        # Only accept it if it's explicitly a Video or a Document
+                        # (Ignores welcome photos, ad banners, and plain text)
+                        if response.video or response.document:
+                            target_video_msg = response
+                            break 
+                    except asyncio.TimeoutError:
+                        break # Stop checking if the bot stops talking
+
+                if target_video_msg:
+                    print(f"✅ Video received from @{bot_username}! Forwarding...")
+                    await client.send_file(
+                        DESTINATION_CHAT, 
+                        target_video_msg.media, 
+                        caption=f"Extracted from {chat_name}"
+                    )
+                else:
+                    print("❌ Bot replied, but did not send a video or document file.")
+                    await client.send_message(
+                        'me', 
+                        f"⚠️ **Target Bot Failed**\n@{bot_username} did not send a video for link:\n{url_to_visit}"
+                    )
+        except asyncio.TimeoutError:
+             print("Conversation timed out.")
+             await client.send_message(
+                 'me', 
+                 f"⏱ **Timeout**\n@{bot_username} took too long to respond for link:\n{url_to_visit}"
+             )
+        except Exception as e:
+            print(f"Conversation failed: {e}")
+
+
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
 async def handler(event):
     chat = await event.get_chat()
@@ -263,104 +370,12 @@ async def handler(event):
     if not links:
         return
 
-    print(f"--- New Message from {chat_name} ---")
+    print(f"--- New Message from {chat_name} (Found {len(links)} links) ---")
     
-    for i, url_to_visit in enumerate(links, 1):
-        print(f"\nProcessing Link: {url_to_visit}")
-
-        loop = asyncio.get_running_loop()
-        scrape_result = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
-        
-        bot_start_link, debug_content = scrape_result
-
-        # ==========================================================
-        # DIRECT VIDEO UPLOADER
-        # ==========================================================
-        if bot_start_link == "DOWNLOADED_FILE":
-            temp_file_name = debug_content
-            file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
-            print(f"✅ Local download complete! Size: {file_size_mb:.2f} MB")
-            print("🚀 Starting Telegram upload...")
-            
-            async def upload_progress(current, total):
-                print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
-
-            try:
-                await client.send_file(
-                    DESTINATION_CHAT, 
-                    file=temp_file_name, 
-                    caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
-                    progress_callback=upload_progress,
-                    supports_streaming=True
-                )
-                print("\n✅ Upload complete!")
-            except Exception as upload_err:
-                print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
-                bot_start_link = None
-                debug_content = f"Telegram Upload Error: {str(upload_err)}"
-            
-            if os.path.exists(temp_file_name):
-                os.remove(temp_file_name)
-                
-            if bot_start_link == "DOWNLOADED_FILE": 
-                continue 
-
-        # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
-        if not bot_start_link:
-            print("Failed to get link. Sending debug HTML to Saved Messages...")
-            caption = f"❌ **Extraction Failed**\nCould not find a valid link inside:\n{url_to_visit}"
-            
-            if debug_content:
-                debug_file = io.BytesIO(debug_content.encode('utf-8'))
-                debug_file.name = "debug_page_source.txt"
-                
-                await client.send_file('me', file=debug_file, caption=caption)
-            else:
-                await client.send_message('me', caption + "\n\n(No HTML content was retrieved)")
-                
-            continue 
-
-        parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
-        parsed = re.search(parse_pattern, bot_start_link)
-
-        if parsed:
-            bot_username = parsed.group(1)
-            start_token = parsed.group(2)
-
-            try:
-                print(f"Interacting with @{bot_username}...")
-                async with client.conversation(bot_username, timeout=20) as conv:
-                    await conv.send_message(f"/start {start_token}")
-                    response = await conv.get_response()
-
-                    limit = 3
-                    while limit > 0 and not response.media:
-                         response = await conv.get_response()
-                         limit -= 1
-
-                    if response.media:
-                        print("Video received! Forwarding...")
-                        await client.send_file(
-                            DESTINATION_CHAT, 
-                            response.media, 
-                            caption=f"Extracted from {chat_name}"
-                        )
-                    else:
-                        print("Bot replied, but did not send a media file.")
-                        await client.send_message(
-                            'me', 
-                            f"⚠️ **Target Bot Failed**\n@{bot_username} did not send a video for link:\n{url_to_visit}"
-                        )
-            except asyncio.TimeoutError:
-                 print("Conversation timed out.")
-                 await client.send_message(
-                     'me', 
-                     f"⏱ **Timeout**\n@{bot_username} took too long to respond for link:\n{url_to_visit}"
-                 )
-            except Exception as e:
-                print(f"Conversation failed: {e}")
-        
-        await asyncio.sleep(2)
+    # Launch a background task for each link so multiple messages 
+    # and albums are processed concurrently without blocking!
+    for url_to_visit in links:
+        asyncio.create_task(process_single_link(url_to_visit, chat_name))
 
 
 async def main():
