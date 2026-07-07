@@ -1,2 +1,4 @@
 telethon
 curl_cffi
+cryptg
+opencv-python-headless
