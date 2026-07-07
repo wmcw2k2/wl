@@ -7,10 +7,18 @@ import urllib.request
 import shutil
 import cv2  
 from urllib.parse import urlparse, parse_qs
+from collections import defaultdict
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl, DocumentAttributeVideo
 from telethon.sessions import StringSession
 from curl_cffi import requests as c_requests
+
+# === SPEED CHECK ===
+try:
+    import cryptg
+    print("✅ cryptg is installed! Telethon encryption will run at MAX speed.")
+except ImportError:
+    print("⚠️ WARNING: cryptg is NOT installed! Downloads/uploads will be EXTREMELY SLOW. Add it to requirements.txt")
 
 # ================= CONFIGURATION =================
 API_ID = int(os.environ.get('API_ID', '0')) 
@@ -39,6 +47,10 @@ DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm", "kozow.com"]
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
+
+# --- LOCK QUEUE TO PREVENT "EXCLUSIVE CONVERSATION" CRASHES ---
+bot_locks = defaultdict(asyncio.Lock)
+
 
 def scrape_target_url(url, allowed_domains):
     print(f"Scraping URL: {url}")
@@ -333,7 +345,7 @@ async def process_single_link(url_to_visit, chat_name):
             
         return 
 
-    # ---> FAILURE LOGIC: Send HTML to Saved Messages <---
+    # ---> FAILURE LOGIC <---
     if not bot_start_link:
         print("Failed to get link. Sending debug HTML to Saved Messages...")
         caption = f"❌ **Extraction Failed**\nCould not find a valid link inside:\n{url_to_visit}"
@@ -348,7 +360,7 @@ async def process_single_link(url_to_visit, chat_name):
         return 
 
     # ==========================================================
-    # BOT CONVERSATION HANDLER
+    # BOT CONVERSATION HANDLER (WITH LOCK QUEUE & ALBUM SUPPORT)
     # ==========================================================
     parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
     parsed = re.search(parse_pattern, bot_start_link)
@@ -358,88 +370,101 @@ async def process_single_link(url_to_visit, chat_name):
         start_token = parsed.group(2)
 
         try:
-            print(f"Interacting with @{bot_username}...")
-            async with client.conversation(bot_username, timeout=30) as conv:
-                await conv.send_message(f"/start {start_token}")
+            print(f"⏳ Waiting in queue to interact with @{bot_username}...")
+            
+            # --- FIX: QUEUES MULTIPLE LINKS FOR THE SAME BOT SO IT NEVER CRASHES ---
+            async with bot_locks[bot_username]:
+                print(f"🟢 Lock acquired! Interacting with @{bot_username}...")
                 
-                target_video_msg = None
-                
-                for _ in range(10):
-                    try:
-                        # ---> REDUCED TIMEOUT TO 3 SECONDS FOR FAST EXECUTION <---
-                        response = await conv.get_response(timeout=3)
-                        
-                        media_type = type(response.media).__name__ if response.media else "No Media"
-                        print(f"[{bot_username}] Got msg: '{response.text[:20]}...' | Media: {media_type}")
-                        
-                        if response.video or response.document:
-                            target_video_msg = response
-                            break 
-                    except asyncio.TimeoutError:
-                        print(f"[{bot_username}] Finished waiting for new messages.")
-                        break 
-
-                if target_video_msg:
-                    print(f"✅ Video found from @{bot_username}! Attempting to forward...")
+                async with client.conversation(bot_username, timeout=30) as conv:
+                    await conv.send_message(f"/start {start_token}")
                     
-                    try:
-                        await client.send_message(DESTINATION_CHAT, message=target_video_msg)
-                        print(f"✅ Successfully forwarded to destination!")
-                    except Exception as forward_err:
-                        print(f"⚠️ Direct forward failed ({forward_err}). Bot likely restricts forwarding.")
-                        print("⬇️ Falling back to manual download & re-upload to bypass restriction...")
-                        
-                        temp_path = None
-                        thumb_path = None
+                    target_media_msgs = []
+                    
+                    # --- FIX: COLLECTS ALL PHOTOS/VIDEOS (ALBUMS) INSTEAD OF JUST ONE ---
+                    while True:
                         try:
-                            video_attributes = []
-                            if target_video_msg.document:
-                                for a in target_video_msg.document.attributes:
-                                    if isinstance(a, DocumentAttributeVideo):
-                                        video_attributes.append(a)
+                            # Wait up to 15s for the first file, then rapidly collect the rest
+                            wait_time = 15 if not target_media_msgs else 3
+                            response = await conv.get_response(timeout=wait_time)
                             
-                            if target_video_msg.document and target_video_msg.document.thumbs:
-                                thumb_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
-                                await client.download_media(target_video_msg.document.thumbs[0], file=thumb_path)
+                            media_type = type(response.media).__name__ if response.media else "No Media"
+                            print(f"[{bot_username}] Got msg | Media: {media_type}")
+                            
+                            if response.media and (response.video or response.document or response.photo):
+                                target_media_msgs.append(response)
+                        except asyncio.TimeoutError:
+                            print(f"[{bot_username}] Finished gathering files for this link.")
+                            break 
 
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-                                temp_path = tmp_file.name
-                                
-                            await client.download_media(target_video_msg, file=temp_path)
+                    if target_media_msgs:
+                        print(f"✅ Found {len(target_media_msgs)} media file(s) from @{bot_username}! Processing...")
+                        
+                        # Loop through EVERY piece of media the bot sent and upload it
+                        for idx, target_media_msg in enumerate(target_media_msgs, 1):
+                            print(f"➡️ Processing file {idx} of {len(target_media_msgs)}...")
                             
-                            if not video_attributes:
-                                attr, gen_thumb = await loop.run_in_executor(None, extract_video_metadata, temp_path)
-                                if attr: video_attributes.append(attr)
-                                if gen_thumb and not thumb_path: thumb_path = gen_thumb
+                            try:
+                                await client.send_message(DESTINATION_CHAT, message=target_media_msg)
+                                print(f"✅ Successfully forwarded file {idx} to destination!")
+                            except Exception as forward_err:
+                                print(f"⚠️ Direct forward failed ({forward_err}). Falling back to manual download...")
+                                
+                                temp_path = None
+                                thumb_path = None
+                                try:
+                                    # Determine if it's a video or photo to assign correct extension
+                                    is_video = bool(target_media_msg.video or target_media_msg.document)
+                                    extension = ".mp4" if is_video else ".jpg"
+                                    
+                                    video_attributes = []
+                                    if is_video and target_media_msg.document:
+                                        for a in target_media_msg.document.attributes:
+                                            if isinstance(a, DocumentAttributeVideo):
+                                                video_attributes.append(a)
+                                    
+                                    if target_media_msg.document and target_media_msg.document.thumbs:
+                                        thumb_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
+                                        await client.download_media(target_media_msg.document.thumbs[0], file=thumb_path)
 
-                            print("🚀 Download complete. Uploading fast to destination channel...")
-                            
-                            async def bot_upload_progress(current, total):
-                                print(f"Uploading bypassed video: {current * 100 / total:.1f}%", end='\r')
-                                
-                            await client.send_file(
-                                DESTINATION_CHAT, 
-                                file=temp_path, 
-                                caption=f"Extracted from {chat_name}\nBot: @{bot_username}",
-                                progress_callback=bot_upload_progress,
-                                supports_streaming=True,
-                                attributes=video_attributes if video_attributes else None,
-                                thumb=thumb_path
-                            )
-                            print("\n✅ Manual upload complete!")
-                        except Exception as manual_err:
-                            print(f"\n❌ Manual download/upload also failed: {manual_err}")
-                        finally:
-                            if temp_path and os.path.exists(temp_path):
-                                os.remove(temp_path)
-                            if thumb_path and os.path.exists(thumb_path):
-                                os.remove(thumb_path)
-                else:
-                    print(f"❌ @{bot_username} did not send a video file.")
-                    await client.send_message(
-                        'me', 
-                        f"⚠️ **Target Bot Failed**\n@{bot_username} did not send a video for link:\n{url_to_visit}"
-                    )
+                                    with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
+                                        temp_path = tmp_file.name
+                                        
+                                    await client.download_media(target_media_msg, file=temp_path)
+                                    
+                                    if is_video and not video_attributes:
+                                        attr, gen_thumb = await loop.run_in_executor(None, extract_video_metadata, temp_path)
+                                        if attr: video_attributes.append(attr)
+                                        if gen_thumb and not thumb_path: thumb_path = gen_thumb
+
+                                    print(f"🚀 Download complete. Uploading file {idx}...")
+                                    
+                                    async def bot_upload_progress(current, total):
+                                        print(f"Uploading bypassed file {idx}: {current * 100 / total:.1f}%", end='\r')
+                                        
+                                    await client.send_file(
+                                        DESTINATION_CHAT, 
+                                        file=temp_path, 
+                                        caption=f"Extracted from {chat_name} (File {idx}/{len(target_media_msgs)})\nBot: @{bot_username}",
+                                        progress_callback=bot_upload_progress,
+                                        supports_streaming=is_video,
+                                        attributes=video_attributes if video_attributes else None,
+                                        thumb=thumb_path if is_video else None
+                                    )
+                                    print(f"\n✅ Manual upload of file {idx} complete!")
+                                except Exception as manual_err:
+                                    print(f"\n❌ Manual download/upload for file {idx} failed: {manual_err}")
+                                finally:
+                                    if temp_path and os.path.exists(temp_path):
+                                        os.remove(temp_path)
+                                    if thumb_path and os.path.exists(thumb_path):
+                                        os.remove(thumb_path)
+                    else:
+                        print(f"❌ @{bot_username} did not send any media files.")
+                        await client.send_message(
+                            'me', 
+                            f"⚠️ **Target Bot Failed**\n@{bot_username} did not send media for link:\n{url_to_visit}"
+                        )
         except Exception as e:
             print(f"Conversation with @{bot_username} failed: {e}")
 
