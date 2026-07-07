@@ -24,7 +24,11 @@ SOURCE_CHATS = [
     -1003895656006,
     '@Ukussapremium_bot', 
     2047350734,
-    '@PremiumJil_bot'
+    '@PremiumJil_bot',
+    '@sepalanthaya_bot',
+    -1004426349670,
+    -1003614577146,
+    '@kamasthranew_bot'
 ]
 
 DESTINATION_CHAT = -1001676677601 
