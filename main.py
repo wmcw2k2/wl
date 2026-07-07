@@ -5,9 +5,10 @@ import asyncio
 import tempfile
 import urllib.request
 import shutil
+import cv2  # NEW: For video metadata and thumbnails
 from urllib.parse import urlparse, parse_qs
 from telethon import TelegramClient, events
-from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
+from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl, DocumentAttributeVideo
 from telethon.sessions import StringSession
 from curl_cffi import requests as c_requests
 
@@ -144,17 +145,14 @@ def scrape_target_url(url, allowed_domains):
             return None, None
         # =========================================================
 
-        # CHECK 1: Is the FIRST link files.fm?
         dl_flag, dl_path = attempt_direct_download(url, html_content)
         if dl_flag == "DOWNLOADED_FILE":
             return dl_flag, dl_path
 
-        # CHECK 1b: Is it a JS Map Locker page?
         js_tg_link = attempt_js_map_extract(url, html_content)
         if js_tg_link:
             return js_tg_link, html_content
 
-        # Step 2: Telegram Link logic
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
         match = re.search(tg_pattern, html_content)
         
@@ -195,12 +193,10 @@ def scrape_target_url(url, allowed_domains):
             
         html_content = response2.text
         
-        # CHECK 2: Is the INTERMEDIARY link files.fm?
         dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
         if dl_flag == "DOWNLOADED_FILE":
             return dl_flag, dl_path
 
-        # CHECK 2b: Is it a JS Map Locker page?
         js_tg_link = attempt_js_map_extract(intermediary_link, html_content)
         if js_tg_link:
             return js_tg_link, html_content
@@ -255,6 +251,43 @@ async def add_domain_handler(event):
 
 
 # ====================================================================
+# NEW FEATURE: Metadata Extractor for Videos (Fixes Zoom / 0:00 issues)
+# ====================================================================
+def extract_video_metadata(file_path):
+    """Uses OpenCV to get exact width, height, duration, and a thumbnail."""
+    try:
+        cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            return None, None
+            
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        duration = int(frames / fps) if fps > 0 else 0
+        
+        # Read a frame at 1 second mark (1000ms) to use as thumbnail
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+        ret, frame = cap.read()
+        thumb_path = None
+        
+        if ret:
+            thumb_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            thumb_path = thumb_file.name
+            thumb_file.close()
+            cv2.imwrite(thumb_path, frame)
+            
+        cap.release()
+        
+        # Pass these accurate dimensions to Telethon!
+        attr = DocumentAttributeVideo(duration=duration, w=w, h=h, supports_streaming=True)
+        return attr, thumb_path
+    except Exception as e:
+        print(f"⚠️ Metadata extraction error: {e}")
+        return None, None
+
+
+# ====================================================================
 # Background Task Processor
 # ====================================================================
 async def process_single_link(url_to_visit, chat_name):
@@ -272,7 +305,13 @@ async def process_single_link(url_to_visit, chat_name):
         temp_file_name = debug_content
         file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
         print(f"✅ Local download complete! Size: {file_size_mb:.2f} MB")
-        print("🚀 Starting Telegram upload...")
+        print("🔍 Extracting video metadata & generating thumbnail...")
+        
+        # Process video metadata to fix "0:00" and "zoomed playback"
+        attr, thumb_path = await loop.run_in_executor(None, extract_video_metadata, temp_file_name)
+        attrs_list = [attr] if attr else []
+
+        print("🚀 Starting fast Telegram upload...")
         
         async def upload_progress(current, total):
             print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
@@ -283,14 +322,19 @@ async def process_single_link(url_to_visit, chat_name):
                 file=temp_file_name, 
                 caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
                 progress_callback=upload_progress,
-                supports_streaming=True
+                supports_streaming=True,
+                attributes=attrs_list,   # <--- FIX: Provides Duration, Width, Height
+                thumb=thumb_path         # <--- FIX: Provides actual thumbnail image
             )
             print("\n✅ Upload complete!")
         except Exception as upload_err:
             print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
             
+        # Clean up files
         if os.path.exists(temp_file_name):
             os.remove(temp_file_name)
+        if thumb_path and os.path.exists(thumb_path):
+            os.remove(thumb_path)
             
         return 
 
@@ -309,7 +353,7 @@ async def process_single_link(url_to_visit, chat_name):
         return 
 
     # ==========================================================
-    # BOT CONVERSATION HANDLER (Smart Restrict/Forward Bypass)
+    # BOT CONVERSATION HANDLER
     # ==========================================================
     parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
     parsed = re.search(parse_pattern, bot_start_link)
@@ -325,17 +369,13 @@ async def process_single_link(url_to_visit, chat_name):
                 
                 target_video_msg = None
                 
-                # Listen to up to 10 sequential messages to find the video
                 for _ in range(10):
                     try:
-                        # Increased to 20 seconds. Some bots are slow to generate/upload!
                         response = await conv.get_response(timeout=20)
                         
-                        # Debugging line to see exactly what the bot is sending
                         media_type = type(response.media).__name__ if response.media else "No Media"
                         print(f"[{bot_username}] Got msg: '{response.text[:20]}...' | Media: {media_type}")
                         
-                        # Look explicitly for video or document
                         if response.video or response.document:
                             target_video_msg = response
                             break 
@@ -347,24 +387,40 @@ async def process_single_link(url_to_visit, chat_name):
                     print(f"✅ Video found from @{bot_username}! Attempting to forward...")
                     
                     try:
-                        # Try forwarding directly first (Fastest)
                         await client.send_message(DESTINATION_CHAT, message=target_video_msg)
                         print(f"✅ Successfully forwarded to destination!")
                     except Exception as forward_err:
-                        # If forward fails, the bot likely has protect_content=True enabled
                         print(f"⚠️ Direct forward failed ({forward_err}). Bot likely restricts forwarding.")
                         print("⬇️ Falling back to manual download & re-upload to bypass restriction...")
                         
                         temp_path = None
+                        thumb_path = None
                         try:
-                            # Create temporary file
+                            # 1. Capture the original video dimensions from the restricted message!
+                            video_attributes = []
+                            if target_video_msg.document:
+                                for a in target_video_msg.document.attributes:
+                                    if isinstance(a, DocumentAttributeVideo):
+                                        video_attributes.append(a)
+                            
+                            # 2. Capture the original thumbnail from the restricted message!
+                            if target_video_msg.document and target_video_msg.document.thumbs:
+                                thumb_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
+                                await client.download_media(target_video_msg.document.thumbs[0], file=thumb_path)
+
+                            # 3. Download the actual heavy video
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
                                 temp_path = tmp_file.name
                                 
-                            # Download video from the bot locally
                             await client.download_media(target_video_msg, file=temp_path)
                             
-                            print("🚀 Download complete. Uploading to destination channel...")
+                            # Fallback: If original bot didn't have attributes, extract them ourselves
+                            if not video_attributes:
+                                attr, gen_thumb = await loop.run_in_executor(None, extract_video_metadata, temp_path)
+                                if attr: video_attributes.append(attr)
+                                if gen_thumb and not thumb_path: thumb_path = gen_thumb
+
+                            print("🚀 Download complete. Uploading fast to destination channel...")
                             
                             async def bot_upload_progress(current, total):
                                 print(f"Uploading bypassed video: {current * 100 / total:.1f}%", end='\r')
@@ -374,15 +430,18 @@ async def process_single_link(url_to_visit, chat_name):
                                 file=temp_path, 
                                 caption=f"Extracted from {chat_name}\nBot: @{bot_username}",
                                 progress_callback=bot_upload_progress,
-                                supports_streaming=True
+                                supports_streaming=True,
+                                attributes=video_attributes if video_attributes else None, # Fixes 0:00 duration
+                                thumb=thumb_path # Fixes black screen
                             )
                             print("\n✅ Manual upload complete!")
                         except Exception as manual_err:
                             print(f"\n❌ Manual download/upload also failed: {manual_err}")
                         finally:
-                            # Clean up the Heroku storage
                             if temp_path and os.path.exists(temp_path):
                                 os.remove(temp_path)
+                            if thumb_path and os.path.exists(thumb_path):
+                                os.remove(thumb_path)
                 else:
                     print(f"❌ @{bot_username} did not send a video file.")
                     await client.send_message(
@@ -404,8 +463,6 @@ async def handler(event):
 
     print(f"--- New Message from {chat_name} (Found {len(links)} links) ---")
     
-    # Launch a background task for each link so multiple messages 
-    # and albums are processed concurrently without blocking!
     for url_to_visit in links:
         asyncio.create_task(process_single_link(url_to_visit, chat_name))
 
