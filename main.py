@@ -5,7 +5,7 @@ import asyncio
 import tempfile
 import urllib.request
 import shutil
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
 from telethon.sessions import StringSession
@@ -29,7 +29,8 @@ SOURCE_CHATS = [
 
 DESTINATION_CHAT = -1001676677601 
 
-DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm"]
+# Added kozow.com so it automatically recognizes sepalanthaya links
+DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm", "kozow.com"]
 # =================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -50,6 +51,43 @@ def scrape_target_url(url, allowed_domains):
             return None, f"❌ Target actively blocked Chrome impersonation (403): {url}"
             
         html_content = response.text
+
+        # =========================================================
+        # INTERNAL JS MAP EXTRACTOR (For Sepalanthaya locker pages)
+        # =========================================================
+        def attempt_js_map_extract(page_url, page_html):
+            if "${code}" in page_html and "t.me/" in page_html:
+                print("Detecting JS-based locker page...")
+                bot_match = re.search(r'https://t\.me/([a-zA-Z0-9_]+)\?start=\$\{code\}', page_html)
+                
+                if bot_match:
+                    bot_username = bot_match.group(1)
+                    parsed_url = urlparse(page_url)
+                    query_params = parse_qs(parsed_url.query)
+                    
+                    if 'p' in query_params:
+                        raw_param = query_params['p'][0]
+                        final_code = raw_param # Fallback to raw param
+                        
+                        try:
+                            # Fetch obfuscatedMap.js based on current URL path
+                            base_path = page_url.split('?')[0].rsplit('/', 1)[0]
+                            map_url = f"{base_path}/obfuscatedMap.js"
+                            
+                            map_resp = session.get(map_url, timeout=10)
+                            if map_resp.status_code == 200:
+                                # Find the mapped value for our param
+                                map_match = re.search(rf'["\']{re.escape(raw_param)}["\']\s*:\s*["\']([^"\']+)["\']', map_resp.text)
+                                if map_match:
+                                    final_code = map_match.group(1)
+                                    print(f"✅ Decoded obfuscated param: {raw_param} -> {final_code}")
+                        except Exception as e:
+                            print(f"⚠️ Could not process obfuscatedMap.js: {e}")
+                        
+                        telegram_link = f"https://t.me/{bot_username}?start={final_code}"
+                        print(f"✅ Generated Telegram Deep Link: {telegram_link}")
+                        return telegram_link
+            return None
 
         # =========================================================
         # INTERNAL DOWNLOAD FUNCTION (Using Native Python)
@@ -75,10 +113,8 @@ def scrape_target_url(url, allowed_domains):
                 print("⬇️ Downloading file natively to bypass HTTP/2 chunking bugs...")
                 
                 try:
-                    # Extract Cloudflare cookies from the c_requests session
                     cookie_str = "; ".join([f"{k}={v}" for k, v in session.cookies.get_dict().items()])
                     
-                    # Build exact browser headers
                     req = urllib.request.Request(
                         video_url, 
                         headers={
@@ -91,13 +127,11 @@ def scrape_target_url(url, allowed_domains):
                         }
                     )
                     
-                    # Download flawlessly using shutil to avoid dropped binary chunks
                     with urllib.request.urlopen(req, timeout=120) as vid_resp:
                         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                         shutil.copyfileobj(vid_resp, tmp_file)
                         tmp_file.close()
                         
-                        # Verify we didn't just download a tiny error page (Must be > 100KB)
                         if os.path.getsize(tmp_file.name) > 100000:
                             return "DOWNLOADED_FILE", tmp_file.name
                         else:
@@ -114,6 +148,11 @@ def scrape_target_url(url, allowed_domains):
         dl_flag, dl_path = attempt_direct_download(url, html_content)
         if dl_flag == "DOWNLOADED_FILE":
             return dl_flag, dl_path
+
+        # CHECK 1b: Is it a JS Map Locker page?
+        js_tg_link = attempt_js_map_extract(url, html_content)
+        if js_tg_link:
+            return js_tg_link, html_content
 
         # Step 2: Telegram Link logic
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
@@ -160,6 +199,11 @@ def scrape_target_url(url, allowed_domains):
         dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
         if dl_flag == "DOWNLOADED_FILE":
             return dl_flag, dl_path
+
+        # CHECK 2b: Is it a JS Map Locker page?
+        js_tg_link = attempt_js_map_extract(intermediary_link, html_content)
+        if js_tg_link:
+            return js_tg_link, html_content
 
         match2 = re.search(tg_pattern, html_content)
         if match2:
@@ -255,7 +299,6 @@ async def handler(event):
                 bot_start_link = None
                 debug_content = f"Telegram Upload Error: {str(upload_err)}"
             
-            # Clean up the file from Heroku storage
             if os.path.exists(temp_file_name):
                 os.remove(temp_file_name)
                 
