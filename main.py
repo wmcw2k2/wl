@@ -5,7 +5,7 @@ import asyncio
 import tempfile
 import urllib.request
 import shutil
-import cv2  # NEW: For video metadata and thumbnails
+import cv2  
 from urllib.parse import urlparse, parse_qs
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl, DocumentAttributeVideo
@@ -251,10 +251,9 @@ async def add_domain_handler(event):
 
 
 # ====================================================================
-# NEW FEATURE: Metadata Extractor for Videos (Fixes Zoom / 0:00 issues)
+# Metadata Extractor for Videos
 # ====================================================================
 def extract_video_metadata(file_path):
-    """Uses OpenCV to get exact width, height, duration, and a thumbnail."""
     try:
         cap = cv2.VideoCapture(file_path)
         if not cap.isOpened():
@@ -266,7 +265,6 @@ def extract_video_metadata(file_path):
         frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
         duration = int(frames / fps) if fps > 0 else 0
         
-        # Read a frame at 1 second mark (1000ms) to use as thumbnail
         cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
         ret, frame = cap.read()
         thumb_path = None
@@ -279,7 +277,6 @@ def extract_video_metadata(file_path):
             
         cap.release()
         
-        # Pass these accurate dimensions to Telethon!
         attr = DocumentAttributeVideo(duration=duration, w=w, h=h, supports_streaming=True)
         return attr, thumb_path
     except Exception as e:
@@ -307,7 +304,6 @@ async def process_single_link(url_to_visit, chat_name):
         print(f"✅ Local download complete! Size: {file_size_mb:.2f} MB")
         print("🔍 Extracting video metadata & generating thumbnail...")
         
-        # Process video metadata to fix "0:00" and "zoomed playback"
         attr, thumb_path = await loop.run_in_executor(None, extract_video_metadata, temp_file_name)
         attrs_list = [attr] if attr else []
 
@@ -323,14 +319,13 @@ async def process_single_link(url_to_visit, chat_name):
                 caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
                 progress_callback=upload_progress,
                 supports_streaming=True,
-                attributes=attrs_list,   # <--- FIX: Provides Duration, Width, Height
-                thumb=thumb_path         # <--- FIX: Provides actual thumbnail image
+                attributes=attrs_list,
+                thumb=thumb_path
             )
             print("\n✅ Upload complete!")
         except Exception as upload_err:
             print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
             
-        # Clean up files
         if os.path.exists(temp_file_name):
             os.remove(temp_file_name)
         if thumb_path and os.path.exists(thumb_path):
@@ -371,7 +366,8 @@ async def process_single_link(url_to_visit, chat_name):
                 
                 for _ in range(10):
                     try:
-                        response = await conv.get_response(timeout=20)
+                        # ---> REDUCED TIMEOUT TO 3 SECONDS FOR FAST EXECUTION <---
+                        response = await conv.get_response(timeout=3)
                         
                         media_type = type(response.media).__name__ if response.media else "No Media"
                         print(f"[{bot_username}] Got msg: '{response.text[:20]}...' | Media: {media_type}")
@@ -396,25 +392,21 @@ async def process_single_link(url_to_visit, chat_name):
                         temp_path = None
                         thumb_path = None
                         try:
-                            # 1. Capture the original video dimensions from the restricted message!
                             video_attributes = []
                             if target_video_msg.document:
                                 for a in target_video_msg.document.attributes:
                                     if isinstance(a, DocumentAttributeVideo):
                                         video_attributes.append(a)
                             
-                            # 2. Capture the original thumbnail from the restricted message!
                             if target_video_msg.document and target_video_msg.document.thumbs:
                                 thumb_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
                                 await client.download_media(target_video_msg.document.thumbs[0], file=thumb_path)
 
-                            # 3. Download the actual heavy video
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
                                 temp_path = tmp_file.name
                                 
                             await client.download_media(target_video_msg, file=temp_path)
                             
-                            # Fallback: If original bot didn't have attributes, extract them ourselves
                             if not video_attributes:
                                 attr, gen_thumb = await loop.run_in_executor(None, extract_video_metadata, temp_path)
                                 if attr: video_attributes.append(attr)
@@ -431,8 +423,8 @@ async def process_single_link(url_to_visit, chat_name):
                                 caption=f"Extracted from {chat_name}\nBot: @{bot_username}",
                                 progress_callback=bot_upload_progress,
                                 supports_streaming=True,
-                                attributes=video_attributes if video_attributes else None, # Fixes 0:00 duration
-                                thumb=thumb_path # Fixes black screen
+                                attributes=video_attributes if video_attributes else None,
+                                thumb=thumb_path
                             )
                             print("\n✅ Manual upload complete!")
                         except Exception as manual_err:
