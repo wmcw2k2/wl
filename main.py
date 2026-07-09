@@ -65,24 +65,22 @@ bot_locks = defaultdict(asyncio.Lock)
 # ADVANCED PLAYWRIGHT BYPASSER FOR SUB2UNLOCK
 # ====================================================================
 async def bypass_sub2unlock(url):
-    print(f"\n[*] Launching browser from custom path...")
+    print(f"\n[*] Launching browser using Heroku Buildpack Chrome...")
     
     async with async_playwright() as p:
-        # Define the exact path where we installed it
-        INSTALL_PATH = "/app/playwright-browser"
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = INSTALL_PATH
+        # The buildpack installs Chrome here:
+        chrome_path = "/app/.apt/usr/bin/google-chrome" 
         
-        # Find the actual chrome binary inside the downloaded folder
-        # (Playwright installs it in a versioned sub-folder)
-        browser_dir = os.path.join(INSTALL_PATH, "chromium-1140", "chrome-linux")
-        chrome_path = os.path.join(browser_dir, "chrome")
-        
+        # If that path doesn't exist, try the alternate location:
+        if not os.path.exists(chrome_path):
+            chrome_path = "/app/.chrome-for-testing/chrome-linux64/chrome"
+
         browser = await p.chromium.launch(
             headless=True,
-            executable_path=chrome_path, # Now it knows exactly where it is!
+            executable_path=chrome_path, # Use the buildpack's binary
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
-        # ... rest of the code ...
+        # ... rest of your code ...
         
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
