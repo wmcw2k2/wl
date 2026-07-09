@@ -68,17 +68,18 @@ async def bypass_sub2unlock(url):
     print(f"\n[*] Launching headless browser for Sub2Unlock: {url}")
     
     async with async_playwright() as p:
-        # Update your browser launch in the bypass_sub2unlock function:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage", # Crucial for Heroku (prevents memory crashes)
-                "--single-process",        # Reduces overhead
-                "--disable-gpu"            # Heroku doesn't have a GPU
-            ]
-        )
+    # Force Playwright to use the location we defined in bin_setup.py
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/app/.cache/ms-playwright"
+    
+    browser = await p.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu"
+        ]
+    )
+    # ... rest of your code
         
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
