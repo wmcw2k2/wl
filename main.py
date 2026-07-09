@@ -138,30 +138,28 @@ async def bypass_sub2unlock(url):
             if await unlock_btn.is_visible():
                 print("[*] Clicking 'Get Your Link'...")
                 await unlock_btn.evaluate("el => el.removeAttribute('disabled')")
-                await unlock_btn.click(force=True)
                 
-                print("[*] Waiting for redirect or link reveal...")
-                # Wait 5 seconds for the page to navigate or change
-                await asyncio.sleep(5)
-                
-                # METHOD 1: Check if we were redirected
-                if "sub2unlock.me" not in page.url and "t.me" in page.url:
-                    print(f"✅ Success! Extracted via Redirect: {page.url}")
-                    return page.url
-                
-                # METHOD 2: Look for the hidden <a> link inside the page DOM
-                # These sites often update a link with id 'get-link' or similar
-                final_link = await page.evaluate('''() => {
-                    // Try to find a link that starts with t.me
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const tmeLink = links.find(a => a.href && a.href.includes('t.me/'));
-                    return tmeLink ? tmeLink.href : null;
-                }''')
-                
-                if final_link:
-                    print(f"✅ Success! Extracted via DOM scan: {final_link}")
-                    return final_link
+                # We use a Promise to wait for the page to navigate away
+                # This catches the navigation the moment the button click triggers it
+                try:
+                    async with page.expect_navigation(timeout=15000) as nav_info:
+                        await unlock_btn.click(force=True)
+                    
+                    final_url = page.url
+                    if "t.me" in final_url:
+                        print(f"✅ SUCCESS! Caught navigation to: {final_url}")
+                        return final_url
+                except:
+                    print("[*] No immediate navigation detected.")
 
+                # Fallback: Sometimes the link opens in a new tab
+                # We already have a pop-up handler, so check if page.context.pages has a new one
+                await asyncio.sleep(2)
+                for p in page.context.pages:
+                    if "t.me" in p.url:
+                        print(f"✅ SUCCESS! Caught link in new tab: {p.url}")
+                        return p.url
+                        
             print("❌ Bypass Failed: Link not found in API, Redirect, or DOM.")
             # Let's see what the page looks like now
             content = await page.content()
