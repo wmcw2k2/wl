@@ -37,7 +37,9 @@ SOURCE_CHATS = [
     '@sepalanthaya_bot',
     -1004426349670,
     -1003614577146,
-    '@kamasthranew_bot'
+    '@kamasthranew_bot',
+    -1004347282963,
+    -1003919794212
 ]
 
 DESTINATION_CHAT = -1001676677601 
