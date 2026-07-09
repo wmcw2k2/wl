@@ -2,9 +2,11 @@ import os
 import subprocess
 import sys
 
-# Tell Playwright where to store browsers in the Heroku /app folder
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/app/.cache/ms-playwright"
+# Define a persistent, writable path
+INSTALL_PATH = "/app/playwright-browser"
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = INSTALL_PATH
 
-print("[*] Manually installing Playwright browser binaries...")
+print("[*] Installing Playwright browser to:", INSTALL_PATH)
+# This command will download and install the browser into our specific folder
 subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
 print("[*] Installation complete.")
