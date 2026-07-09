@@ -65,21 +65,24 @@ bot_locks = defaultdict(asyncio.Lock)
 # ADVANCED PLAYWRIGHT BYPASSER FOR SUB2UNLOCK
 # ====================================================================
 async def bypass_sub2unlock(url):
-    print(f"\n[*] Launching headless browser for Sub2Unlock: {url}")
+    print(f"\n[*] Launching browser from custom path...")
     
     async with async_playwright() as p:
-    # Force Playwright to use the location we defined in bin_setup.py
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/app/.cache/ms-playwright"
+        # Define the exact path where we installed it
+        INSTALL_PATH = "/app/playwright-browser"
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = INSTALL_PATH
+        
+        # Find the actual chrome binary inside the downloaded folder
+        # (Playwright installs it in a versioned sub-folder)
+        browser_dir = os.path.join(INSTALL_PATH, "chromium-1140", "chrome-linux")
+        chrome_path = os.path.join(browser_dir, "chrome")
         
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
+            executable_path=chrome_path, # Now it knows exactly where it is!
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
-        # ... rest of your code
+        # ... rest of the code ...
         
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
