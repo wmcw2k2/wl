@@ -68,11 +68,15 @@ async def bypass_sub2unlock(url):
     print(f"\n[*] Launching headless browser for Sub2Unlock: {url}")
     
     async with async_playwright() as p:
+        # Update your browser launch in the bypass_sub2unlock function:
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process"
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage", # Crucial for Heroku (prevents memory crashes)
+                "--single-process",        # Reduces overhead
+                "--disable-gpu"            # Heroku doesn't have a GPU
             ]
         )
         
