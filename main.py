@@ -13,7 +13,7 @@ from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl, DocumentAt
 from telethon.sessions import StringSession
 from curl_cffi import requests as c_requests
 
-# === SPEED CHECK ===
+# === SPEED CHECKkk ===
 try:
     import cryptg
     print("✅ cryptg is installed! Telethon encryption will run at MAX speed.")
