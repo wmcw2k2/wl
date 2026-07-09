@@ -140,17 +140,32 @@ async def bypass_sub2unlock(url):
                 await unlock_btn.evaluate("el => el.removeAttribute('disabled')")
                 await unlock_btn.click(force=True)
                 
-                print("[*] Waiting for background API to decrypt and fetch the Telegram link...")
-                for _ in range(10):
-                    if extracted_link:
-                        print(f"✅ Playwright Extracted Link: {extracted_link}")
-                        return extracted_link
-                    await asyncio.sleep(1)
+                print("[*] Waiting for redirect or link reveal...")
+                # Wait 5 seconds for the page to navigate or change
+                await asyncio.sleep(5)
+                
+                # METHOD 1: Check if we were redirected
+                if "sub2unlock.me" not in page.url and "t.me" in page.url:
+                    print(f"✅ Success! Extracted via Redirect: {page.url}")
+                    return page.url
+                
+                # METHOD 2: Look for the hidden <a> link inside the page DOM
+                # These sites often update a link with id 'get-link' or similar
+                final_link = await page.evaluate('''() => {
+                    // Try to find a link that starts with t.me
+                    const links = Array.from(document.querySelectorAll('a'));
+                    const tmeLink = links.find(a => a.href && a.href.includes('t.me/'));
+                    return tmeLink ? tmeLink.href : null;
+                }''')
+                
+                if final_link:
+                    print(f"✅ Success! Extracted via DOM scan: {final_link}")
+                    return final_link
 
-            if page.url != url and "sub2unlock.me" not in page.url and "t.me" in page.url:
-                extracted_link = page.url
-                print(f"✅ Playwright Extracted Link (via Redirect): {extracted_link}")
-                return extracted_link
+            print("❌ Bypass Failed: Link not found in API, Redirect, or DOM.")
+            # Let's see what the page looks like now
+            content = await page.content()
+            return None # This will trigger your "Sending debug HTML" logic
 
             print("❌ Sub2Unlock Bypass Failed.")
         except Exception as e:
