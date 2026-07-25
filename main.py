@@ -13,7 +13,7 @@ from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl, DocumentAt
 from telethon.sessions import StringSession
 from curl_cffi import requests as c_requests
 
-# === SPEED CHECKk ===
+# === SPEED CHECK ===
 try:
     import cryptg
     print("✅ cryptg is installed! Telethon encryption will run at MAX speed.")
@@ -46,12 +46,13 @@ SOURCE_CHATS = [
     '@kamasthranew_bot',
     -1004347282963,
     -1003919794212,
-    -1003995891596
+    -1003995891596,
+    -1001577090635
 ]
 
 DESTINATION_CHAT = -1001676677601 
 
-DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "files.fm", "kozow.com", "sub2unlock.me"]
+DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "files.fm", "kozow.com", "sub2unlock.me"]
 # =================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -62,25 +63,49 @@ bot_locks = defaultdict(asyncio.Lock)
 
 
 # ====================================================================
+# FIRESTORE BYPASSER FOR JILHUB
+# ====================================================================
+def bypass_jilhub_sync(url):
+    print(f"\n[*] Executing Firestore exploit for: {url}")
+    slug = url.rstrip('/').split('/')[-1]
+    
+    # Hit the Google Firestore REST API directly
+    api_url = f"https://firestore.googleapis.com/v1/projects/jhub-46611/databases/(default)/documents/links/{slug}"
+    session = c_requests.Session(impersonate="chrome110")
+    
+    try:
+        resp = session.get(api_url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            fields = data.get("fields", {})
+            for key, value_dict in fields.items():
+                if isinstance(value_dict, dict) and value_dict:
+                    val = list(value_dict.values())[0]
+                    if isinstance(val, str) and "t.me" in val:
+                        print(f"✅ Jilhub Bypassed (Firestore Direct): {val}")
+                        return val
+        print(f"❌ Firestore returned {resp.status_code}. Document might be missing.")
+    except Exception as e:
+        print(f"❌ Jilhub bypass failed: {e}")
+    return None
+
+
+# ====================================================================
 # ADVANCED PLAYWRIGHT BYPASSER FOR SUB2UNLOCK
 # ====================================================================
 async def bypass_sub2unlock(url):
     print(f"\n[*] Launching browser using Heroku Buildpack Chrome...")
     
     async with async_playwright() as p:
-        # The buildpack installs Chrome here:
         chrome_path = "/app/.apt/usr/bin/google-chrome" 
-        
-        # If that path doesn't exist, try the alternate location:
         if not os.path.exists(chrome_path):
             chrome_path = "/app/.chrome-for-testing/chrome-linux64/chrome"
 
         browser = await p.chromium.launch(
             headless=True,
-            executable_path=chrome_path, # Use the buildpack's binary
+            executable_path=chrome_path,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
-        # ... rest of your code ...
         
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
@@ -101,7 +126,6 @@ async def bypass_sub2unlock(url):
             print("[-] Task clicked. Blocked the pop-up tab.")
             try: await new_page.close()
             except Exception: pass
-
         context.on("page", handle_new_page)
 
         async def handle_response(response):
@@ -111,9 +135,7 @@ async def bypass_sub2unlock(url):
                     body = await response.json()
                     if "url" in body and "t.me" in body["url"]:
                         extracted_link = body["url"]
-                except Exception:
-                    pass
-
+                except Exception: pass
         page.on("response", handle_response)
 
         try:
@@ -128,8 +150,7 @@ async def bypass_sub2unlock(url):
                     print(f"[*] Clicking Task #{i}...")
                     await step.click(force=True)
                     await asyncio.sleep(2)
-                except Exception:
-                    pass
+                except Exception: pass
             
             print("[*] Waiting 10 seconds for the internal JS timer...")
             await asyncio.sleep(10)
@@ -139,12 +160,9 @@ async def bypass_sub2unlock(url):
                 print("[*] Clicking 'Get Your Link'...")
                 await unlock_btn.evaluate("el => el.removeAttribute('disabled')")
                 
-                # We use a Promise to wait for the page to navigate away
-                # This catches the navigation the moment the button click triggers it
                 try:
                     async with page.expect_navigation(timeout=15000) as nav_info:
                         await unlock_btn.click(force=True)
-                    
                     final_url = page.url
                     if "t.me" in final_url:
                         print(f"✅ SUCCESS! Caught navigation to: {final_url}")
@@ -152,8 +170,6 @@ async def bypass_sub2unlock(url):
                 except:
                     print("[*] No immediate navigation detected.")
 
-                # Fallback: Sometimes the link opens in a new tab
-                # We already have a pop-up handler, so check if page.context.pages has a new one
                 await asyncio.sleep(2)
                 for p in page.context.pages:
                     if "t.me" in p.url:
@@ -161,11 +177,9 @@ async def bypass_sub2unlock(url):
                         return p.url
                         
             print("❌ Bypass Failed: Link not found in API, Redirect, or DOM.")
-            # Let's see what the page looks like now
             content = await page.content()
-            return None # This will trigger your "Sending debug HTML" logic
+            return None 
 
-            print("❌ Sub2Unlock Bypass Failed.")
         except Exception as e:
             print(f"❌ Playwright execution error: {e}")
         finally:
@@ -297,10 +311,14 @@ def scrape_target_url(url, allowed_domains):
             print("❌ Failed: No valid intermediary links matched our domain list.")
             return None, html_content
 
-        # If intermediary link is Sub2Unlock, we hand it back to Playwright!
+        # Internal Routing Fallbacks from Intermediary Links
         if "sub2unlock.me" in intermediary_link:
             print("✅ Found Sub2Unlock inside page! Sending back to Playwright...")
             return "SUB2UNLOCK", intermediary_link
+            
+        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize"]):
+            print("✅ Found Jilhub inside page! Sending back to Firestore bypasser...")
+            return "JILHUB", intermediary_link
             
         print(f"Found matching intermediary link: {intermediary_link}")
         response2 = session.get(intermediary_link, allow_redirects=True, timeout=20)
@@ -321,7 +339,6 @@ def scrape_target_url(url, allowed_domains):
             print("✅ Found Telegram link on the SECOND page!")
             return match2.group(1), html_content
         
-        # In case the secondary page redirects to sub2unlock
         sub2_match = re.search(r'(https://sub2unlock\.me/[a-zA-Z0-9]+)', html_content)
         if sub2_match:
             print("✅ Found Sub2Unlock inside SECOND page! Sending back to Playwright...")
@@ -405,7 +422,13 @@ async def process_single_link(url_to_visit, chat_name):
     debug_content = None
 
     # --- SMART ROUTER ---
-    if "sub2unlock.me" in url_to_visit:
+    is_jilhub = any(domain in url_to_visit for domain in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize"])
+    
+    if is_jilhub:
+        loop = asyncio.get_running_loop()
+        bot_start_link = await loop.run_in_executor(None, bypass_jilhub_sync, url_to_visit)
+        debug_content = "Jilhub Extracted via Firestore"
+    elif "sub2unlock.me" in url_to_visit:
         bot_start_link = await bypass_sub2unlock(url_to_visit)
         debug_content = "Sub2Unlock Processed via Playwright"
     else:
@@ -413,12 +436,17 @@ async def process_single_link(url_to_visit, chat_name):
         scrape_result = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
         bot_start_link, debug_content = scrape_result
         
-        # If the fast scraper found a Sub2Unlock link hidden inside the page, route it to Playwright!
+        # Internal Routing Fallbacks
         if bot_start_link == "SUB2UNLOCK":
             print(f"🔄 Routing internal link to Sub2Unlock Bypasser...")
             sub2_url = debug_content
             bot_start_link = await bypass_sub2unlock(sub2_url)
             debug_content = "Sub2Unlock Processed via Playwright (from Intermediary)"
+        elif bot_start_link == "JILHUB":
+            print(f"🔄 Routing internal link to Jilhub Bypasser...")
+            jilhub_url = debug_content
+            bot_start_link = await loop.run_in_executor(None, bypass_jilhub_sync, jilhub_url)
+            debug_content = "Jilhub Processed via Firestore (from Intermediary)"
 
     # ==========================================================
     # DIRECT VIDEO UPLOADER
