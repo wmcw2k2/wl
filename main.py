@@ -51,6 +51,7 @@ SOURCE_CHATS = [
 ]
 
 DESTINATION_CHAT = -1001676677601 
+DESTINATION_CHAT_2 = -1004468317813  # <--- REPLACE THIS WITH YOUR 2ND CHAT ID
 
 DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "files.fm", "kozow.com", "sub2unlock.me"]
 # =================================================
@@ -466,7 +467,8 @@ async def process_single_link(url_to_visit, chat_name):
             print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
 
         try:
-            await client.send_file(
+            # Upload to original destination
+            sent_msg = await client.send_file(
                 DESTINATION_CHAT, 
                 file=temp_file_name, 
                 caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
@@ -475,7 +477,13 @@ async def process_single_link(url_to_visit, chat_name):
                 attributes=attrs_list,
                 thumb=thumb_path
             )
-            print("\n✅ Upload complete!")
+            print("\n✅ Upload complete to DESTINATION_CHAT!")
+            
+            # Re-send media to second destination WITHOUT caption/sender info
+            if sent_msg and sent_msg.media:
+                await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
+                print("✅ Copied to DESTINATION_CHAT_2 (Hidden Sender & Caption)!")
+                
         except Exception as upload_err:
             print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
             
@@ -533,8 +541,15 @@ async def process_single_link(url_to_visit, chat_name):
                         for idx, target_media_msg in enumerate(target_media_msgs, 1):
                             print(f"➡️ Processing file {idx} of {len(target_media_msgs)}...")
                             try:
-                                await client.send_message(DESTINATION_CHAT, message=target_media_msg)
-                                print(f"✅ Successfully forwarded file {idx} to destination!")
+                                # Direct forward to DESTINATION_CHAT
+                                sent_msg = await client.send_message(DESTINATION_CHAT, message=target_media_msg)
+                                print(f"✅ Successfully forwarded file {idx} to DESTINATION_CHAT!")
+                                
+                                # Send media directly to DESTINATION_CHAT_2 without caption/sender info
+                                if sent_msg and sent_msg.media:
+                                    await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
+                                    print(f"✅ Copied file {idx} to DESTINATION_CHAT_2 (Hidden Sender & Caption)!")
+                                    
                             except Exception as forward_err:
                                 print(f"⚠️ Direct forward failed ({forward_err}). Falling back to manual download...")
                                 temp_path = None
@@ -568,7 +583,8 @@ async def process_single_link(url_to_visit, chat_name):
                                     async def bot_upload_progress(current, total):
                                         print(f"Uploading bypassed file {idx}: {current * 100 / total:.1f}%", end='\r')
                                         
-                                    await client.send_file(
+                                    # Upload to DESTINATION_CHAT
+                                    sent_msg = await client.send_file(
                                         DESTINATION_CHAT, 
                                         file=temp_path, 
                                         caption=f"Extracted from {chat_name} (File {idx}/{len(target_media_msgs)})\nBot: @{bot_username}",
@@ -577,7 +593,13 @@ async def process_single_link(url_to_visit, chat_name):
                                         attributes=video_attributes if video_attributes else None,
                                         thumb=thumb_path if is_video else None
                                     )
-                                    print(f"\n✅ Manual upload of file {idx} complete!")
+                                    print(f"\n✅ Manual upload of file {idx} to DESTINATION_CHAT complete!")
+                                    
+                                    # Copy to DESTINATION_CHAT_2 (No caption, no sender info)
+                                    if sent_msg and sent_msg.media:
+                                        await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
+                                        print(f"✅ Copied file {idx} to DESTINATION_CHAT_2 (Hidden Sender & Caption)!")
+                                        
                                 except Exception as manual_err:
                                     print(f"\n❌ Manual download/upload for file {idx} failed: {manual_err}")
                                 finally:
