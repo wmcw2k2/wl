@@ -47,13 +47,15 @@ SOURCE_CHATS = [
     -1004347282963,
     -1003919794212,
     -1003995891596,
-    -1001577090635
+    -1001577090635,
+    -1004433802308
 ]
 
 DESTINATION_CHAT = -1001676677601 
 DESTINATION_CHAT_2 = -1004468317813  # <--- REPLACE THIS WITH YOUR 2ND CHAT ID
 
-DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "files.fm", "kozow.com", "sub2unlock.me"]
+# Added clipgo.xyz to default domains
+DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "clipgo.xyz", "files.fm", "kozow.com", "sub2unlock.me"]
 # =================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -64,14 +66,20 @@ bot_locks = defaultdict(asyncio.Lock)
 
 
 # ====================================================================
-# FIRESTORE BYPASSER FOR JILHUB
+# UNIVERSAL FIRESTORE BYPASSER (Jilhub & ClipGo)
 # ====================================================================
-def bypass_jilhub_sync(url):
+def bypass_firestore_sync(url):
     print(f"\n[*] Executing Firestore exploit for: {url}")
     slug = url.rstrip('/').split('/')[-1]
     
+    # Determine which Firebase project to hit based on the domain
+    if "clipgo.xyz" in url:
+        project_id = "linksite-5d1d5"
+    else:
+        project_id = "jhub-46611" # Default for Jilhub variants
+        
     # Hit the Google Firestore REST API directly
-    api_url = f"https://firestore.googleapis.com/v1/projects/jhub-46611/databases/(default)/documents/links/{slug}"
+    api_url = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/links/{slug}"
     session = c_requests.Session(impersonate="chrome110")
     
     try:
@@ -83,11 +91,11 @@ def bypass_jilhub_sync(url):
                 if isinstance(value_dict, dict) and value_dict:
                     val = list(value_dict.values())[0]
                     if isinstance(val, str) and "t.me" in val:
-                        print(f"✅ Jilhub Bypassed (Firestore Direct): {val}")
+                        print(f"✅ Firestore Direct Bypassed ({project_id}): {val}")
                         return val
         print(f"❌ Firestore returned {resp.status_code}. Document might be missing.")
     except Exception as e:
-        print(f"❌ Jilhub bypass failed: {e}")
+        print(f"❌ Firestore bypass failed: {e}")
     return None
 
 
@@ -317,9 +325,9 @@ def scrape_target_url(url, allowed_domains):
             print("✅ Found Sub2Unlock inside page! Sending back to Playwright...")
             return "SUB2UNLOCK", intermediary_link
             
-        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize"]):
-            print("✅ Found Jilhub inside page! Sending back to Firestore bypasser...")
-            return "JILHUB", intermediary_link
+        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "clipgo.xyz"]):
+            print("✅ Found Firestore Site inside page! Sending back to bypasser...")
+            return "FIRESTORE", intermediary_link
             
         print(f"Found matching intermediary link: {intermediary_link}")
         response2 = session.get(intermediary_link, allow_redirects=True, timeout=20)
@@ -423,12 +431,12 @@ async def process_single_link(url_to_visit, chat_name):
     debug_content = None
 
     # --- SMART ROUTER ---
-    is_jilhub = any(domain in url_to_visit for domain in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize"])
+    is_firestore_site = any(domain in url_to_visit for domain in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "clipgo.xyz"])
     
-    if is_jilhub:
+    if is_firestore_site:
         loop = asyncio.get_running_loop()
-        bot_start_link = await loop.run_in_executor(None, bypass_jilhub_sync, url_to_visit)
-        debug_content = "Jilhub Extracted via Firestore"
+        bot_start_link = await loop.run_in_executor(None, bypass_firestore_sync, url_to_visit)
+        debug_content = "Extracted via Direct Firestore API"
     elif "sub2unlock.me" in url_to_visit:
         bot_start_link = await bypass_sub2unlock(url_to_visit)
         debug_content = "Sub2Unlock Processed via Playwright"
@@ -443,11 +451,11 @@ async def process_single_link(url_to_visit, chat_name):
             sub2_url = debug_content
             bot_start_link = await bypass_sub2unlock(sub2_url)
             debug_content = "Sub2Unlock Processed via Playwright (from Intermediary)"
-        elif bot_start_link == "JILHUB":
-            print(f"🔄 Routing internal link to Jilhub Bypasser...")
-            jilhub_url = debug_content
-            bot_start_link = await loop.run_in_executor(None, bypass_jilhub_sync, jilhub_url)
-            debug_content = "Jilhub Processed via Firestore (from Intermediary)"
+        elif bot_start_link == "FIRESTORE":
+            print(f"🔄 Routing internal link to Firestore Bypasser...")
+            firestore_url = debug_content
+            bot_start_link = await loop.run_in_executor(None, bypass_firestore_sync, firestore_url)
+            debug_content = "Processed via Firestore (from Intermediary)"
 
     # ==========================================================
     # DIRECT VIDEO UPLOADER
