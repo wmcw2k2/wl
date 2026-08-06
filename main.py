@@ -54,8 +54,8 @@ SOURCE_CHATS = [
 DESTINATION_CHAT = -1001676677601 
 DESTINATION_CHAT_2 = -1004468317813  # <--- REPLACE THIS WITH YOUR 2ND CHAT ID
 
-# Added clipgo.xyz to default domains
-DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "clipgo.xyz", "files.fm", "kozow.com", "sub2unlock.me"]
+# Added sub2unlock.xyz to default domains
+DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz", "files.fm", "kozow.com", "sub2unlock.me"]
 # =================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -66,14 +66,14 @@ bot_locks = defaultdict(asyncio.Lock)
 
 
 # ====================================================================
-# UNIVERSAL FIRESTORE BYPASSER (Jilhub & ClipGo)
+# UNIVERSAL FIRESTORE BYPASSER (Jilhub, ClipGo, Sub2Unlock.xyz)
 # ====================================================================
 def bypass_firestore_sync(url):
     print(f"\n[*] Executing Firestore exploit for: {url}")
     slug = url.rstrip('/').split('/')[-1]
     
     # Determine which Firebase project to hit based on the domain
-    if "clipgo.xyz" in url:
+    if any(domain in url for domain in ["clipgo.xyz", "sub2unlock.xyz"]):
         project_id = "linksite-5d1d5"
     else:
         project_id = "jhub-46611" # Default for Jilhub variants
@@ -100,7 +100,7 @@ def bypass_firestore_sync(url):
 
 
 # ====================================================================
-# ADVANCED PLAYWRIGHT BYPASSER FOR SUB2UNLOCK
+# ADVANCED PLAYWRIGHT BYPASSER FOR SUB2UNLOCK (.ME)
 # ====================================================================
 async def bypass_sub2unlock(url):
     print(f"\n[*] Launching browser using Heroku Buildpack Chrome...")
@@ -322,10 +322,10 @@ def scrape_target_url(url, allowed_domains):
 
         # Internal Routing Fallbacks from Intermediary Links
         if "sub2unlock.me" in intermediary_link:
-            print("✅ Found Sub2Unlock inside page! Sending back to Playwright...")
+            print("✅ Found Sub2Unlock.me inside page! Sending back to Playwright...")
             return "SUB2UNLOCK", intermediary_link
             
-        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "clipgo.xyz"]):
+        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "clipgo.xyz", "sub2unlock.xyz"]):
             print("✅ Found Firestore Site inside page! Sending back to bypasser...")
             return "FIRESTORE", intermediary_link
             
@@ -350,7 +350,7 @@ def scrape_target_url(url, allowed_domains):
         
         sub2_match = re.search(r'(https://sub2unlock\.me/[a-zA-Z0-9]+)', html_content)
         if sub2_match:
-            print("✅ Found Sub2Unlock inside SECOND page! Sending back to Playwright...")
+            print("✅ Found Sub2Unlock.me inside SECOND page! Sending back to Playwright...")
             return "SUB2UNLOCK", sub2_match.group(1)
 
         print("❌ Failed: Intermediary page did not contain a Telegram link.")
@@ -431,7 +431,7 @@ async def process_single_link(url_to_visit, chat_name):
     debug_content = None
 
     # --- SMART ROUTER ---
-    is_firestore_site = any(domain in url_to_visit for domain in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "clipgo.xyz"])
+    is_firestore_site = any(domain in url_to_visit for domain in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "clipgo.xyz", "sub2unlock.xyz"])
     
     if is_firestore_site:
         loop = asyncio.get_running_loop()
@@ -447,10 +447,10 @@ async def process_single_link(url_to_visit, chat_name):
         
         # Internal Routing Fallbacks
         if bot_start_link == "SUB2UNLOCK":
-            print(f"🔄 Routing internal link to Sub2Unlock Bypasser...")
+            print(f"🔄 Routing internal link to Sub2Unlock.me Bypasser...")
             sub2_url = debug_content
             bot_start_link = await bypass_sub2unlock(sub2_url)
-            debug_content = "Sub2Unlock Processed via Playwright (from Intermediary)"
+            debug_content = "Sub2Unlock.me Processed via Playwright (from Intermediary)"
         elif bot_start_link == "FIRESTORE":
             print(f"🔄 Routing internal link to Firestore Bypasser...")
             firestore_url = debug_content
