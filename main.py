@@ -48,14 +48,18 @@ SOURCE_CHATS = [
     -1003919794212,
     -1003995891596,
     -1001577090635,
-    -1004433802308
+    -1004433802308,
+    -1004484922375
 ]
 
 DESTINATION_CHAT = -1001676677601 
 DESTINATION_CHAT_2 = -1004468317813  # <--- REPLACE THIS WITH YOUR 2ND CHAT ID
 
-# Added video.jilhub.xyz to default domains
-DEFAULT_DOMAINS = ["jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "video.jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz", "files.fm", "kozow.com", "sub2unlock.me"]
+# Added gabadawa.xyz to default domains
+DEFAULT_DOMAINS = [
+    "jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "video.jilhub.xyz", 
+    "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "files.fm", "kozow.com", "sub2unlock.me"
+]
 # =================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
@@ -66,7 +70,7 @@ bot_locks = defaultdict(asyncio.Lock)
 
 
 # ====================================================================
-# UNIVERSAL FIRESTORE BYPASSER (Jilhub, ClipGo, Sub2Unlock.xyz, Video.Jilhub)
+# UNIVERSAL FIRESTORE BYPASSER (Jilhub, ClipGo, Sub2Unlock.xyz, Video.Jilhub, Gabadawa)
 # ====================================================================
 def bypass_firestore_sync(url):
     print(f"\n[*] Executing Firestore exploit for: {url}")
@@ -77,6 +81,8 @@ def bypass_firestore_sync(url):
         project_id = "linksite-5d1d5"
     elif "video.jilhub.xyz" in url:
         project_id = "jhub2-f9b30"
+    elif "gabadawa.xyz" in url:
+        project_id = "csongz"
     else:
         project_id = "jhub-46611" # Default for Jilhub variants
         
@@ -327,7 +333,7 @@ def scrape_target_url(url, allowed_domains):
             print("✅ Found Sub2Unlock.me inside page! Sending back to Playwright...")
             return "SUB2UNLOCK", intermediary_link
             
-        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz"]):
+        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz"]):
             print("✅ Found Firestore Site inside page! Sending back to bypasser...")
             return "FIRESTORE", intermediary_link
             
@@ -433,7 +439,10 @@ async def process_single_link(url_to_visit, chat_name):
     debug_content = None
 
     # --- SMART ROUTER ---
-    is_firestore_site = any(domain in url_to_visit for domain in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz"])
+    is_firestore_site = any(domain in url_to_visit for domain in [
+        "jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", 
+        "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz"
+    ])
     
     if is_firestore_site:
         loop = asyncio.get_running_loop()
