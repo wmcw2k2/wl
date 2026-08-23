@@ -70,21 +70,25 @@ bot_locks = defaultdict(asyncio.Lock)
 
 
 # ====================================================================
-# UNIVERSAL FIRESTORE BYPASSER (Jilhub, ClipGo, Sub2Unlock.xyz, Video.Jilhub, Gabadawa)
+# UNIVERSAL FIRESTORE BYPASSER (Handles Known & Dynamically Detected Sites)
 # ====================================================================
-def bypass_firestore_sync(url):
+def bypass_firestore_sync(url, dynamic_project_id=None):
     print(f"\n[*] Executing Firestore exploit for: {url}")
     slug = url.rstrip('/').split('/')[-1]
     
-    # Determine which Firebase project to hit based on the domain
-    if any(domain in url for domain in ["clipgo.xyz", "sub2unlock.xyz"]):
+    # 1. If the dynamic scanner found the ID, use it immediately
+    if dynamic_project_id:
+        project_id = dynamic_project_id
+        print(f"[*] Using dynamically extracted Project ID: {project_id}")
+    # 2. Otherwise, fall back to the known domains list
+    elif any(domain in url for domain in ["clipgo.xyz", "sub2unlock.xyz"]):
         project_id = "linksite-5d1d5"
     elif "video.jilhub.xyz" in url:
         project_id = "jhub2-f9b30"
     elif "gabadawa.xyz" in url:
         project_id = "csongz"
     else:
-        project_id = "jhub-46611" # Default for Jilhub variants
+        project_id = "jhub-46611" # Default for original Jilhub variants
         
     # Hit the Google Firestore REST API directly
     api_url = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/links/{slug}"
@@ -221,6 +225,26 @@ def scrape_target_url(url, allowed_domains):
         html_content = response.text
 
         # ---------------- INTERNAL EXTRACTORS ----------------
+        def attempt_dynamic_firestore(page_url, page_html):
+            """Dynamically scans unknown websites for Firebase configurations."""
+            # 1. Check raw HTML for inline config
+            match = re.search(r'projectId\s*:\s*["\']([^"\']+)["\']', page_html)
+            if match: return match.group(1)
+            
+            # 2. Check linked JS files (Vite/React apps hide config in /assets/index-xxx.js)
+            js_files = re.findall(r'src=["\'](/assets/[^"\']+\.js)["\']', page_html)
+            for js_file in js_files:
+                parsed = urlparse(page_url)
+                js_url = f"{parsed.scheme}://{parsed.netloc}{js_file}"
+                try:
+                    js_resp = session.get(js_url, timeout=5)
+                    if js_resp.status_code == 200:
+                        js_match = re.search(r'projectId\s*:\s*["\']([^"\']+)["\']', js_resp.text)
+                        if js_match: return js_match.group(1)
+                except:
+                    pass
+            return None
+
         def attempt_js_map_extract(page_url, page_html):
             if "${code}" in page_html and "t.me/" in page_html:
                 print("Detecting JS-based locker page...")
@@ -293,9 +317,15 @@ def scrape_target_url(url, allowed_domains):
             return None, None
         # -----------------------------------------------------
 
-        # Check First Page
+        # Check First Page for direct video download
         dl_flag, dl_path = attempt_direct_download(url, html_content)
         if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
+        
+        # Check First Page for dynamic Firestore detection!
+        dyn_proj_id = attempt_dynamic_firestore(url, html_content)
+        if dyn_proj_id:
+            print(f"✅ Dynamically detected unknown Firestore domain! Project ID: {dyn_proj_id}")
+            return "FIRESTORE_DYNAMIC", f"{url}|{dyn_proj_id}"
 
         js_tg_link = attempt_js_map_extract(url, html_content)
         if js_tg_link: return js_tg_link, html_content
@@ -333,8 +363,9 @@ def scrape_target_url(url, allowed_domains):
             print("✅ Found Sub2Unlock.me inside page! Sending back to Playwright...")
             return "SUB2UNLOCK", intermediary_link
             
+        # Hardcoded Firestore Fallback
         if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz"]):
-            print("✅ Found Firestore Site inside page! Sending back to bypasser...")
+            print("✅ Found Known Firestore Site inside page! Sending back to bypasser...")
             return "FIRESTORE", intermediary_link
             
         print(f"Found matching intermediary link: {intermediary_link}")
@@ -347,6 +378,12 @@ def scrape_target_url(url, allowed_domains):
         
         dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
         if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
+        
+        # Check Secondary Page for dynamic Firestore detection!
+        dyn_proj_id_2 = attempt_dynamic_firestore(intermediary_link, html_content)
+        if dyn_proj_id_2:
+            print(f"✅ Dynamically detected unknown Firestore domain on intermediary! Project ID: {dyn_proj_id_2}")
+            return "FIRESTORE_DYNAMIC", f"{intermediary_link}|{dyn_proj_id_2}"
 
         js_tg_link = attempt_js_map_extract(intermediary_link, html_content)
         if js_tg_link: return js_tg_link, html_content
@@ -462,11 +499,18 @@ async def process_single_link(url_to_visit, chat_name):
             sub2_url = debug_content
             bot_start_link = await bypass_sub2unlock(sub2_url)
             debug_content = "Sub2Unlock.me Processed via Playwright (from Intermediary)"
+            
         elif bot_start_link == "FIRESTORE":
             print(f"🔄 Routing internal link to Firestore Bypasser...")
             firestore_url = debug_content
             bot_start_link = await loop.run_in_executor(None, bypass_firestore_sync, firestore_url)
             debug_content = "Processed via Firestore (from Intermediary)"
+            
+        elif bot_start_link == "FIRESTORE_DYNAMIC":
+            print(f"🔄 Routing dynamically detected site to Firestore Bypasser...")
+            target_url, dyn_proj_id = debug_content.split('|', 1)
+            bot_start_link = await loop.run_in_executor(None, bypass_firestore_sync, target_url, dyn_proj_id)
+            debug_content = "Processed via Dynamic Firestore Detection"
 
     # ==========================================================
     # DIRECT VIDEO UPLOADER
