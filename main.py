@@ -54,7 +54,7 @@ MY_OWNER_ID = 2076006645 # Only you can use the toggle command
 
 CHANNEL_1_LINK = "https://t.me/+q0A3T5Sm3l5kMWFh"
 CHANNEL_2_LINK = "https://t.me/+ilqc6YCcH105M2Rh"
-FINAL_CHANNEL_LINK = "https://t.me/+DfZ2OOZhHnwyZWZh"
+FINAL_CHANNEL_LINK = "https://t.me/+dGavgBgyBlA1MTVh"
 
 # The IDs of the two channels (Ensure bot is ADMIN with 'Invite Users' permission in both)
 CHANNEL_1_ID = -1004390399908
