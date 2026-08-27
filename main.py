@@ -40,7 +40,7 @@ SOURCE_CHATS = [
 ]
 
 DESTINATION_CHAT = -1001676677601 
-DESTINATION_CHAT_2 = -1003601681072
+DESTINATION_CHAT_2 = -1004233359054
 
 DEFAULT_DOMAINS = [
     "jillanthaya.giize", "jilhub.giize", "jilhub.xyz", "video.jilhub.xyz", 
