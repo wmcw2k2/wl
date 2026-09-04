@@ -112,6 +112,52 @@ def bypass_firestore_sync(url):
     return None
 
 # ====================================================================
+# PLAYWRIGHT BYPASSER FOR UNLOCKIFY (StackProtect Bypass)
+# ====================================================================
+async def bypass_unlockify(url):
+    print(f"\n[*] Launching Playwright to bypass StackProtect for: {url}")
+    async with async_playwright() as p:
+        chrome_path = "/app/.apt/usr/bin/google-chrome" 
+        if not os.path.exists(chrome_path):
+            chrome_path = "/app/.chrome-for-testing/chrome-linux64/chrome"
+
+        browser = await p.chromium.launch(
+            headless=True,
+            executable_path=chrome_path,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 720}
+        )
+        page = await context.new_page()
+
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            print("[*] Waiting 10 seconds for StackProtect challenge to clear...")
+            await asyncio.sleep(10) 
+
+            if "t.me" in page.url:
+                print(f"✅ SUCCESS! Caught Unlockify navigation to: {page.url}")
+                return page.url
+                
+            content = await page.content()
+            tg_match = re.search(r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)", content)
+            if tg_match:
+                print("✅ SUCCESS! Found link in Unlockify DOM.")
+                return tg_match.group(1)
+
+            print("❌ Unlockify Bypass Failed: Telegram link not found after waiting.")
+            return None
+            
+        except Exception as e:
+            print(f"❌ Playwright execution error: {e}")
+            return None
+        finally:
+            await browser.close()
+
+
+# ====================================================================
 # ADVANCED PLAYWRIGHT BYPASSER FOR SUB2UNLOCK (.ME)
 # ====================================================================
 async def bypass_sub2unlock(url):
@@ -183,7 +229,6 @@ def scrape_target_url(url, allowed_domains):
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
     session = c_requests.Session(impersonate="chrome110")
-    # Added robust headers for shorteners like unlockify
     session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
 
     try:
@@ -263,6 +308,7 @@ def scrape_target_url(url, allowed_domains):
         if not intermediary_link: return None, html_content
 
         if "sub2unlock.me" in intermediary_link: return "SUB2UNLOCK", intermediary_link
+        if "unlockify.ink" in intermediary_link: return "UNLOCKIFY", intermediary_link
         if any(d in intermediary_link for d in ["jilhub", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"]):
             return "FIRESTORE", intermediary_link
             
@@ -313,7 +359,6 @@ def extract_video_metadata(file_path):
 # QUEUE WORKER: Staggered startups prevent DDoS triggers on shorteners
 # ====================================================================
 async def process_queue_worker(worker_id):
-    # Stagger startups by 2 seconds so they don't hit URL shorteners simultaneously
     await asyncio.sleep(worker_id * 2.0)
     while True:
         url_to_visit, chat_name = await task_queue.get()
@@ -339,12 +384,16 @@ async def process_single_link(url_to_visit, chat_name):
         debug_content = "Extracted via Direct Firestore API"
     elif "sub2unlock.me" in url_to_visit:
         bot_start_link = await bypass_sub2unlock(url_to_visit)
+    elif "unlockify.ink" in url_to_visit:
+        bot_start_link = await bypass_unlockify(url_to_visit)
     else:
         loop = asyncio.get_running_loop()
         bot_start_link, debug_content = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
         
         if bot_start_link == "SUB2UNLOCK":
             bot_start_link = await bypass_sub2unlock(debug_content)
+        elif bot_start_link == "UNLOCKIFY":
+            bot_start_link = await bypass_unlockify(debug_content)
         elif bot_start_link == "FIRESTORE":
             bot_start_link = await loop.run_in_executor(None, bypass_firestore_sync, debug_content)
 
@@ -361,12 +410,12 @@ async def process_single_link(url_to_visit, chat_name):
                     caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
                     supports_streaming=True, attributes=[attr] if attr else [], thumb=thumb_path
                 )
-                await asyncio.sleep(1.5) # Anti-Flood Pacemaker
+                await asyncio.sleep(1.5)
             
             if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
                 async with telegram_api_lock:
                     await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
-                    await asyncio.sleep(1.5) # Anti-Flood Pacemaker
+                    await asyncio.sleep(1.5)
         except errors.FloodWaitError as e:
             print(f"🚨 FLOOD WAIT {e.seconds}s. Skipping to protect account.")
         except Exception as e: print(f"Upload failed: {e}")
@@ -527,7 +576,6 @@ async def main():
     await client.start()
     await bot_client.start(bot_token=BOT_TOKEN)
     
-    # Start the task workers staggered to prevent instant DDoS
     for i in range(CONCURRENT_WORKERS):
         asyncio.create_task(process_queue_worker(i))
         
