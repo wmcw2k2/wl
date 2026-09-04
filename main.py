@@ -65,20 +65,18 @@ RAW_CH1 = int(str(CHANNEL_1_ID).replace("-100", ""))
 RAW_CH2 = int(str(CHANNEL_2_ID).replace("-100", ""))
 # =========================================================
 
-# Global state for forwarding
 FORWARD_TO_CH2 = True
-CONCURRENT_WORKERS = 4  # Process exactly 4 links at a time to prevent HTTP drops
-
-# Create the asynchronous queue
+CONCURRENT_WORKERS = 4  
 task_queue = asyncio.Queue()
 
-# Set flood_sleep_threshold to 60. 
-# If a wait is > 60 seconds (like 3023s), Telethon throws an error instead of freezing the bot.
+# Telethon clients
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, flood_sleep_threshold=60)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
 
+# Locks & memory
 bot_locks = defaultdict(asyncio.Lock)
+telegram_api_lock = asyncio.Lock()  # GLOBAL LOCK: Prevents 3023s Flood Wait
 join_requests = {RAW_CH1: set(), RAW_CH2: set()}
 
 
@@ -185,6 +183,8 @@ def scrape_target_url(url, allowed_domains):
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
     session = c_requests.Session(impersonate="chrome110")
+    # Added robust headers for shorteners like unlockify
+    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
 
     try:
         response = session.get(url, allow_redirects=True, timeout=20)
@@ -310,9 +310,11 @@ def extract_video_metadata(file_path):
 
 
 # ====================================================================
-# QUEUE WORKER: Processes links steadily to avoid HTTP drops
+# QUEUE WORKER: Staggered startups prevent DDoS triggers on shorteners
 # ====================================================================
-async def process_queue_worker():
+async def process_queue_worker(worker_id):
+    # Stagger startups by 2 seconds so they don't hit URL shorteners simultaneously
+    await asyncio.sleep(worker_id * 2.0)
     while True:
         url_to_visit, chat_name = await task_queue.get()
         try:
@@ -353,16 +355,18 @@ async def process_single_link(url_to_visit, chat_name):
         attr, thumb_path = await loop.run_in_executor(None, extract_video_metadata, temp_file_name)
         
         try:
-            sent_msg = await client.send_file(
-                DESTINATION_CHAT, file=temp_file_name, 
-                caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
-                supports_streaming=True, attributes=[attr] if attr else [], thumb=thumb_path
-            )
-            await asyncio.sleep(2) # Anti-Flood
+            async with telegram_api_lock:
+                sent_msg = await client.send_file(
+                    DESTINATION_CHAT, file=temp_file_name, 
+                    caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
+                    supports_streaming=True, attributes=[attr] if attr else [], thumb=thumb_path
+                )
+                await asyncio.sleep(1.5) # Anti-Flood Pacemaker
             
             if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
-                await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
-                await asyncio.sleep(2) # Anti-Flood
+                async with telegram_api_lock:
+                    await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
+                    await asyncio.sleep(1.5) # Anti-Flood Pacemaker
         except errors.FloodWaitError as e:
             print(f"🚨 FLOOD WAIT {e.seconds}s. Skipping to protect account.")
         except Exception as e: print(f"Upload failed: {e}")
@@ -371,9 +375,20 @@ async def process_single_link(url_to_visit, chat_name):
             if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
         return 
 
-    # --- FAILURE TO EXTRACT ---
+    # --- RESTORED FAILURE LOGIC ---
     if not bot_start_link:
-        print(f"❌ Failed: {url_to_visit}")
+        print(f"❌ Failed: {url_to_visit}. Sending debug to Saved Messages.")
+        caption = f"❌ **Extraction Failed**\nCould not find a valid link inside:\n{url_to_visit}"
+        try:
+            async with telegram_api_lock:
+                if debug_content and isinstance(debug_content, str) and len(debug_content) > 50:
+                    debug_file = io.BytesIO(debug_content.encode('utf-8'))
+                    debug_file.name = "debug_page_source.txt"
+                    await client.send_file('me', file=debug_file, caption=caption)
+                else:
+                    await client.send_message('me', caption + f"\n\nError/Content:\n{debug_content}")
+                await asyncio.sleep(1.5)
+        except Exception: pass
         return 
 
     # --- INTERACTING WITH BOTS ---
@@ -384,7 +399,9 @@ async def process_single_link(url_to_visit, chat_name):
             async with bot_locks[bot_username]:
                 async with client.conversation(bot_username, timeout=30) as conv:
                     try:
-                        await conv.send_message(f"/start {start_token}")
+                        async with telegram_api_lock:
+                            await conv.send_message(f"/start {start_token}")
+                            await asyncio.sleep(1.5)
                     except errors.FloodWaitError as e:
                         print(f"🚨 FLOOD WAIT {e.seconds}s. Aborting conversation with {bot_username}.")
                         return
@@ -400,18 +417,18 @@ async def process_single_link(url_to_visit, chat_name):
 
                     for idx, target_media_msg in enumerate(target_media_msgs, 1):
                         try:
-                            sent_msg = await client.send_message(DESTINATION_CHAT, message=target_media_msg)
-                            await asyncio.sleep(2) # Anti-Flood Pacemaker
+                            async with telegram_api_lock:
+                                sent_msg = await client.send_message(DESTINATION_CHAT, message=target_media_msg)
+                                await asyncio.sleep(1.5) 
                             
                             if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
-                                await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
-                                await asyncio.sleep(2) # Anti-Flood Pacemaker
+                                async with telegram_api_lock:
+                                    await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
+                                    await asyncio.sleep(1.5) 
                         except errors.FloodWaitError as e:
                             print(f"🚨 FLOOD WAIT {e.seconds}s on Forward.")
                         except Exception: pass
                 
-                # Critical Anti-Flood Pacemaker: Wait 4 seconds before allowing ANY 
-                # other queued task to message this specific bot again.
                 await asyncio.sleep(4) 
                 
         except Exception as e: print(f"Conversation error: {e}")
@@ -510,9 +527,9 @@ async def main():
     await client.start()
     await bot_client.start(bot_token=BOT_TOKEN)
     
-    # Start the task workers (4 concurrent workers limits HTTP bombardment)
-    for _ in range(CONCURRENT_WORKERS):
-        asyncio.create_task(process_queue_worker())
+    # Start the task workers staggered to prevent instant DDoS
+    for i in range(CONCURRENT_WORKERS):
+        asyncio.create_task(process_queue_worker(i))
         
     print("✅ System Online! Processing queue and listening for messages...")
     await asyncio.gather(
