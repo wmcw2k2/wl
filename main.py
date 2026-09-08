@@ -65,14 +65,14 @@ RAW_CH1 = int(str(CHANNEL_1_ID).replace("-100", ""))
 RAW_CH2 = int(str(CHANNEL_2_ID).replace("-100", ""))
 # =========================================================
 
-# Global state for forwarding to Destination 2
 FORWARD_TO_CH2 = True
+# =========================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
 
-# Locks & memory
+# --- LOCK QUEUE TO PREVENT "EXCLUSIVE CONVERSATION" CRASHES ---
 bot_locks = defaultdict(asyncio.Lock)
 join_requests = {RAW_CH1: set(), RAW_CH2: set()}
 
@@ -84,6 +84,7 @@ def bypass_firestore_sync(url):
     print(f"\n[*] Executing Firestore exploit for: {url}")
     slug = url.rstrip('/').split('/')[-1]
     
+    # Determine which Firebase project to hit based on the domain
     if any(domain in url for domain in ["clipgo.xyz", "sub2unlock.xyz"]):
         project_id = "linksite-5d1d5"
     elif any(domain in url for domain in ["video.jilhub.xyz", "jilzone.xyz"]):
@@ -91,8 +92,9 @@ def bypass_firestore_sync(url):
     elif "gabadawa.xyz" in url:
         project_id = "csongz"
     else:
-        project_id = "jhub-46611"
+        project_id = "jhub-46611" # Default for Jilhub variants
         
+    # Hit the Google Firestore REST API directly
     api_url = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/links/{slug}"
     session = c_requests.Session(impersonate="chrome110")
     
@@ -118,6 +120,7 @@ def bypass_firestore_sync(url):
 # ====================================================================
 async def bypass_sub2unlock(url):
     print(f"\n[*] Launching browser using Heroku Buildpack Chrome...")
+    
     async with async_playwright() as p:
         chrome_path = "/app/.apt/usr/bin/google-chrome" 
         if not os.path.exists(chrome_path):
@@ -128,10 +131,12 @@ async def bypass_sub2unlock(url):
             executable_path=chrome_path,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
         )
+        
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
             viewport={'width': 1280, 'height': 720}
         )
+        
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             window.chrome = { runtime: {} };
@@ -179,6 +184,7 @@ async def bypass_sub2unlock(url):
             if await unlock_btn.is_visible():
                 print("[*] Clicking 'Get Your Link'...")
                 await unlock_btn.evaluate("el => el.removeAttribute('disabled')")
+                
                 try:
                     async with page.expect_navigation(timeout=15000) as nav_info:
                         await unlock_btn.click(force=True)
@@ -196,6 +202,7 @@ async def bypass_sub2unlock(url):
                         return p.url
                         
             print("❌ Bypass Failed: Link not found in API, Redirect, or DOM.")
+            content = await page.content()
             return None 
 
         except Exception as e:
@@ -206,13 +213,16 @@ async def bypass_sub2unlock(url):
 
 
 # ====================================================================
-# FAST CURL_CFFI SCRAPER FOR FILES.FM / JS MAPS / DEEP LINKS
+# FAST CURL_CFFI SCRAPER FOR FILES.FM / UNLOCKIFY / DEEP LINKS
 # ====================================================================
 def scrape_target_url(url, allowed_domains):
     print(f"Scraping URL: {url}")
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
     session = c_requests.Session(impersonate="chrome110")
+    
+    # Required to prevent shorteners from blocking the scraper
+    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
 
     try:
         response = session.get(url, allow_redirects=True, timeout=20)
@@ -221,6 +231,7 @@ def scrape_target_url(url, allowed_domains):
             
         html_content = response.text
 
+        # ---------------- INTERNAL EXTRACTORS ----------------
         def attempt_js_map_extract(page_url, page_html):
             if "${code}" in page_html and "t.me/" in page_html:
                 print("Detecting JS-based locker page...")
@@ -291,9 +302,17 @@ def scrape_target_url(url, allowed_domains):
                 except Exception as e:
                     print(f"❌ Exception during native download: {e}")
             return None, None
-            
+        # -----------------------------------------------------
+
+        # Check First Page for direct video download
         dl_flag, dl_path = attempt_direct_download(url, html_content)
         if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
+
+        # Specially target the 'data-reward-url' attribute found in unlockify clones
+        reward_match = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
+        if reward_match:
+            print("✅ Found Telegram link perfectly inside data-reward-url attribute!")
+            return reward_match.group(1), html_content
 
         js_tg_link = attempt_js_map_extract(url, html_content)
         if js_tg_link: return js_tg_link, html_content
@@ -326,11 +345,12 @@ def scrape_target_url(url, allowed_domains):
             print("❌ Failed: No valid intermediary links matched our domain list.")
             return None, html_content
 
+        # Internal Routing Fallbacks from Intermediary Links
         if "sub2unlock.me" in intermediary_link:
             print("✅ Found Sub2Unlock.me inside page! Sending back to Playwright...")
             return "SUB2UNLOCK", intermediary_link
             
-        if any(d in intermediary_link for d in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"]):
+        if any(d in intermediary_link for d in ["jilhub", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"]):
             print("✅ Found Firestore Site inside page! Sending back to bypasser...")
             return "FIRESTORE", intermediary_link
             
@@ -344,6 +364,12 @@ def scrape_target_url(url, allowed_domains):
         
         dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
         if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
+
+        # Check secondary page for unlockify style reward urls
+        reward_match_2 = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
+        if reward_match_2:
+            print("✅ Found Telegram link inside data-reward-url attribute on secondary page!")
+            return reward_match_2.group(1), html_content
 
         js_tg_link = attempt_js_map_extract(intermediary_link, html_content)
         if js_tg_link: return js_tg_link, html_content
@@ -383,6 +409,22 @@ def get_all_links(event):
     return list(urls)
 
 
+@client.on(events.NewMessage(pattern=r'/adddomain (.*)', from_users='me'))
+async def add_domain_handler(event):
+    url = event.pattern_match.group(1).strip()
+    try:
+        netloc = urlparse(url).netloc
+        if netloc.startswith('www.'): netloc = netloc[4:]
+        keyword = netloc.split('.')[0] 
+        if keyword:
+            INTERMEDIARY_DOMAINS.add(keyword)
+            await event.reply(f"✅ Successfully added keyword: **{keyword}**\n\nCurrently active domains:\n{', '.join(INTERMEDIARY_DOMAINS)}")
+        else:
+            await event.reply("❌ Could not extract a valid domain from that link.")
+    except Exception as e:
+        await event.reply(f"❌ Error parsing link: {e}")
+
+
 def extract_video_metadata(file_path):
     try:
         cap = cv2.VideoCapture(file_path)
@@ -411,7 +453,7 @@ def extract_video_metadata(file_path):
 
 
 # ====================================================================
-# USERBOT: TASK PROCESSOR
+# Background Task Processor
 # ====================================================================
 async def process_single_link(url_to_visit, chat_name):
     print(f"\nProcessing Link: {url_to_visit}")
@@ -419,6 +461,7 @@ async def process_single_link(url_to_visit, chat_name):
     bot_start_link = None
     debug_content = None
 
+    # --- SMART ROUTER ---
     is_firestore_site = any(domain in url_to_visit for domain in [
         "jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", 
         "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"
@@ -436,6 +479,7 @@ async def process_single_link(url_to_visit, chat_name):
         scrape_result = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
         bot_start_link, debug_content = scrape_result
         
+        # Internal Routing Fallbacks
         if bot_start_link == "SUB2UNLOCK":
             print(f"🔄 Routing internal link to Sub2Unlock.me Bypasser...")
             sub2_url = debug_content
@@ -465,6 +509,7 @@ async def process_single_link(url_to_visit, chat_name):
             print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
 
         try:
+            # Upload to original destination
             sent_msg = await client.send_file(
                 DESTINATION_CHAT, 
                 file=temp_file_name, 
@@ -476,7 +521,10 @@ async def process_single_link(url_to_visit, chat_name):
             )
             print("\n✅ Upload complete to DESTINATION_CHAT!")
             
-            # --- FORWARD TO CH2 CONDITIONAL ---
+            # --- INTERVAL ADDED ---
+            await asyncio.sleep(2)
+            
+            # Re-send media to second destination WITHOUT caption/sender info
             if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
                 await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
                 print("✅ Copied to DESTINATION_CHAT_2 (Hidden Sender & Caption)!")
@@ -538,13 +586,19 @@ async def process_single_link(url_to_visit, chat_name):
                         for idx, target_media_msg in enumerate(target_media_msgs, 1):
                             print(f"➡️ Processing file {idx} of {len(target_media_msgs)}...")
                             try:
+                                # Direct forward to DESTINATION_CHAT
                                 sent_msg = await client.send_message(DESTINATION_CHAT, message=target_media_msg)
                                 print(f"✅ Successfully forwarded file {idx} to DESTINATION_CHAT!")
                                 
-                                # --- FORWARD TO CH2 CONDITIONAL ---
+                                # --- INTERVAL ADDED ---
+                                await asyncio.sleep(2)
+                                
+                                # Send media directly to DESTINATION_CHAT_2 without caption/sender info
                                 if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
                                     await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
                                     print(f"✅ Copied file {idx} to DESTINATION_CHAT_2 (Hidden Sender & Caption)!")
+                                    # --- INTERVAL ADDED ---
+                                    await asyncio.sleep(2)
                                     
                             except Exception as forward_err:
                                 print(f"⚠️ Direct forward failed ({forward_err}). Falling back to manual download...")
@@ -579,6 +633,7 @@ async def process_single_link(url_to_visit, chat_name):
                                     async def bot_upload_progress(current, total):
                                         print(f"Uploading bypassed file {idx}: {current * 100 / total:.1f}%", end='\r')
                                         
+                                    # Upload to DESTINATION_CHAT
                                     sent_msg = await client.send_file(
                                         DESTINATION_CHAT, 
                                         file=temp_path, 
@@ -590,10 +645,15 @@ async def process_single_link(url_to_visit, chat_name):
                                     )
                                     print(f"\n✅ Manual upload of file {idx} to DESTINATION_CHAT complete!")
                                     
-                                    # --- FORWARD TO CH2 CONDITIONAL ---
+                                    # --- INTERVAL ADDED ---
+                                    await asyncio.sleep(2)
+                                    
+                                    # Copy to DESTINATION_CHAT_2 (No caption, no sender info)
                                     if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
                                         await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
                                         print(f"✅ Copied file {idx} to DESTINATION_CHAT_2 (Hidden Sender & Caption)!")
+                                        # --- INTERVAL ADDED ---
+                                        await asyncio.sleep(2)
                                         
                                 except Exception as manual_err:
                                     print(f"\n❌ Manual download/upload for file {idx} failed: {manual_err}")
@@ -611,10 +671,10 @@ async def process_single_link(url_to_visit, chat_name):
 
 
 # ====================================================================
-# USERBOT HANDLERS
+# STAGGERED HANDLER LOGIC
 # ====================================================================
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
-async def source_chat_handler(event):
+async def handler(event):
     chat = await event.get_chat()
     chat_name = getattr(chat, 'title', getattr(chat, 'username', chat.id))
     
@@ -622,23 +682,17 @@ async def source_chat_handler(event):
     if not links: return
 
     print(f"--- New Message from {chat_name} (Found {len(links)} links) ---")
-    for url_to_visit in links:
-        asyncio.create_task(process_single_link(url_to_visit, chat_name))
-
-@client.on(events.NewMessage(pattern=r'/adddomain (.*)', from_users='me'))
-async def add_domain_handler(event):
-    url = event.pattern_match.group(1).strip()
-    try:
-        netloc = urlparse(url).netloc
-        if netloc.startswith('www.'): netloc = netloc[4:]
-        keyword = netloc.split('.')[0] 
-        if keyword:
-            INTERMEDIARY_DOMAINS.add(keyword)
-            await event.reply(f"✅ Successfully added keyword: **{keyword}**\n\nCurrently active domains:\n{', '.join(INTERMEDIARY_DOMAINS)}")
-        else:
-            await event.reply("❌ Could not extract a valid domain from that link.")
-    except Exception as e:
-        await event.reply(f"❌ Error parsing link: {e}")
+    
+    # Staggered execution: processes links slowly one by one to avoid 
+    # DDoS triggers on shorteners and Flood Waits on Telegram API.
+    for i, url_to_visit in enumerate(links):
+        async def delayed_process(url, c_name, delay):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await process_single_link(url, c_name)
+            
+        # 4 second delay per link
+        asyncio.create_task(delayed_process(url_to_visit, chat_name, i * 4))
 
 
 # ====================================================================
@@ -655,7 +709,6 @@ async def track_join_requests(update):
 
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    # Edit this welcome text to whatever you prefer
     welcome_text = "Welcome to the bot! Please use /join to proceed."
     await event.reply(welcome_text)
 
@@ -680,7 +733,6 @@ async def check_join_callback(event):
     req_1 = user_id in join_requests[RAW_CH1]
     req_2 = user_id in join_requests[RAW_CH2]
 
-    # Verify if they are already full members
     async def is_member(channel_id):
         try:
             await bot_client.get_permissions(channel_id, user_id)
@@ -695,7 +747,6 @@ async def check_join_callback(event):
         await event.answer("Verification Successful!", alert=False)
         msg = await event.reply(f"Here is your final link:\n{FINAL_CHANNEL_LINK}")
         
-        # Background task to delete after 10 seconds
         async def delete_later(message):
             await asyncio.sleep(10)
             try:
