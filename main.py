@@ -5,7 +5,8 @@ import asyncio
 import tempfile
 import urllib.request
 import shutil
-import cv2  
+import cv2
+import random
 from urllib.parse import urlparse, parse_qs
 from collections import defaultdict
 from telethon import TelegramClient, events, Button
@@ -217,17 +218,64 @@ def scrape_target_url(url, allowed_domains):
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
     session = c_requests.Session(impersonate="chrome110")
-    
-    # Required to prevent shorteners from blocking the scraper
     session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
+    
+    # --- PROXY ROTATION LOGIC ---
+    is_unlockify = "unlockify.ink" in url
+    proxy_list = []
+    
+    if is_unlockify:
+        print("[*] Unlockify detected! Fetching fresh proxy list...")
+        try:
+            p_resp = c_requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all", timeout=10)
+            if p_resp.status_code == 200:
+                proxy_list = [p.strip() for p in p_resp.text.split('\n') if p.strip()]
+                # Shuffle so multi-links get completely separate proxies simultaneously
+                random.shuffle(proxy_list) 
+                print(f"[*] Successfully fetched & shuffled {len(proxy_list)} proxies.")
+        except Exception as e:
+            print(f"⚠️ Failed to fetch proxies: {e}")
+
+    # Try up to 10 proxies if unlockify. Otherwise, just 1 standard attempt.
+    max_attempts = 10 if is_unlockify and proxy_list else 1
+
+    for attempt in range(max_attempts):
+        if is_unlockify and proxy_list:
+            current_proxy = proxy_list[attempt]
+            session.proxies = {"http": f"http://{current_proxy}", "https": f"http://{current_proxy}"}
+            print(f"[*] [{url}] Attempt {attempt+1}/{max_attempts} using Proxy: {current_proxy}")
+
+        try:
+            response = session.get(url, allow_redirects=True, timeout=15)
+            if response.status_code == 403:
+                if is_unlockify:
+                    print(f"❌ [{url}] Proxy received 403. Trying next...")
+                    continue
+                return None, f"❌ Target actively blocked Chrome impersonation (403): {url}"
+                
+            html_content = response.text
+            
+            # Check if StackProtect still blocked the proxy
+            if is_unlockify and "sp_fallback" in html_content:
+                print(f"❌ [{url}] Proxy flagged as bot (StackProtect). Trying next...")
+                continue
+                
+            # If we get here, the proxy worked!
+            if is_unlockify:
+                print(f"✅ [{url}] Proxy {current_proxy} successfully bypassed StackProtect!")
+            break 
+            
+        except Exception as e:
+            if is_unlockify:
+                print(f"❌ [{url}] Proxy Connection Failed ({e}). Trying next...")
+                continue
+            return None, f"Error Exception: {str(e)}\n\nLast HTML extracted:\n{html_content}"
+    else:
+        # Executes if ALL proxy attempts failed
+        if is_unlockify:
+            return None, f"❌ Failed to bypass unlockify after {max_attempts} proxy attempts.\nLast HTML:\n{html_content}"
 
     try:
-        response = session.get(url, allow_redirects=True, timeout=20)
-        if response.status_code == 403:
-            return None, f"❌ Target actively blocked Chrome impersonation (403): {url}"
-            
-        html_content = response.text
-
         # ---------------- INTERNAL EXTRACTORS ----------------
         def attempt_js_map_extract(page_url, page_html):
             if "${code}" in page_html and "t.me/" in page_html:
@@ -301,11 +349,11 @@ def scrape_target_url(url, allowed_domains):
             return None, None
         # -----------------------------------------------------
 
-        # Check First Page
+        # Check First Page for direct video download
         dl_flag, dl_path = attempt_direct_download(url, html_content)
         if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
 
-        # Check for Unlockify reward tag!
+        # Specially target the 'data-reward-url' attribute found in unlockify clones
         reward_match = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
         if reward_match:
             print("✅ Found Telegram link perfectly inside data-reward-url attribute!")
@@ -352,6 +400,8 @@ def scrape_target_url(url, allowed_domains):
             return "FIRESTORE", intermediary_link
             
         print(f"Found matching intermediary link: {intermediary_link}")
+        
+        # Intermediary request will automatically use the successful proxy session!
         response2 = session.get(intermediary_link, allow_redirects=True, timeout=20)
         
         if response2.status_code == 403:
@@ -472,7 +522,6 @@ async def process_single_link(url_to_visit, chat_name):
         bot_start_link = await bypass_sub2unlock(url_to_visit)
         debug_content = "Sub2Unlock Processed via Playwright"
     else:
-        # unlockify.ink goes here naturally now!
         loop = asyncio.get_running_loop()
         scrape_result = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
         bot_start_link, debug_content = scrape_result
@@ -548,7 +597,7 @@ async def process_single_link(url_to_visit, chat_name):
         return 
 
     # ==========================================================
-    # BOT CONVERSATION HANDLER
+    # BOT CONVERSATION HANDLER (WITH LOCK QUEUE & ALBUM SUPPORT)
     # ==========================================================
     parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
     parsed = re.search(parse_pattern, bot_start_link)
