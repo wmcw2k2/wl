@@ -7,6 +7,7 @@ import urllib.request
 import shutil
 import cv2
 import random
+import time
 from urllib.parse import urlparse, parse_qs
 from collections import defaultdict
 from telethon import TelegramClient, events, Button
@@ -73,13 +74,12 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 INTERMEDIARY_DOMAINS = set(DEFAULT_DOMAINS)
 
-# Locks & memory
+# --- GLOBAL BOT STATE & QUEUE ---
 bot_locks = defaultdict(asyncio.Lock)
 join_requests = {RAW_CH1: set(), RAW_CH2: set()}
 
-# GLOBAL BOT STATE
-PROCESS_LOCK = asyncio.Lock()  # Ensures 1 link is processed at a time globally
-GLOBAL_PROXY_LIST = []         # Caches proxies so we don't spam the API
+LINK_QUEUE = asyncio.Queue()  # Holds incoming links sequentially
+WORKING_PROXIES = []          # Remembers proxies that successfully bypassed StackProtect
 
 
 # ====================================================================
@@ -175,6 +175,7 @@ async def bypass_sub2unlock(url):
                     await asyncio.sleep(2)
                 except Exception: pass
             
+            print("[*] Waiting 10 seconds for the internal JS timer...")
             await asyncio.sleep(10)
 
             unlock_btn = page.locator("#file")
@@ -184,14 +185,12 @@ async def bypass_sub2unlock(url):
                     async with page.expect_navigation(timeout=15000) as nav_info:
                         await unlock_btn.click(force=True)
                     final_url = page.url
-                    if "t.me" in final_url:
-                        return final_url
+                    if "t.me" in final_url: return final_url
                 except: pass
 
                 await asyncio.sleep(2)
                 for p in page.context.pages:
-                    if "t.me" in p.url:
-                        return p.url
+                    if "t.me" in p.url: return p.url
                         
             content = await page.content()
             return None 
@@ -208,56 +207,75 @@ async def bypass_sub2unlock(url):
 # ====================================================================
 def scrape_target_url(url, allowed_domains):
     print(f"Scraping URL: {url}")
-    global GLOBAL_PROXY_LIST
+    global WORKING_PROXIES
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
-    html_content = "" 
-    session = c_requests.Session(impersonate="chrome110")
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
+
+    def fetch_with_proxy(target_url):
+        session = c_requests.Session(impersonate="chrome110")
+        session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
+        
+        is_unlockify = "unlockify.ink" in target_url
+        
+        # 1. Direct Connection Attempt
+        try:
+            resp = session.get(target_url, allow_redirects=True, timeout=15)
+            if resp.status_code == 200 and "sp_fallback" not in resp.text:
+                return resp.text, session
+            if not is_unlockify:
+                if resp.status_code == 403: return "403_FORBIDDEN", None
+                return resp.text, session
+        except Exception:
+            if not is_unlockify: return None, None
+            
+        # 2. Infinite Loop Proxy Rotation for Unlockify
+        print(f"⚠️ StackProtect blocked {target_url}. Activating Proxy Rotation (Infinite Retry)...")
+        while True:
+            # Phase A: Test known working proxies first
+            for proxy in list(WORKING_PROXIES):
+                session.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+                print(f"[*] Testing known working proxy: {proxy}")
+                try:
+                    resp = session.get(target_url, allow_redirects=True, timeout=10)
+                    if resp.status_code == 200 and "sp_fallback" not in resp.text:
+                        print(f"✅ Known Proxy {proxy} worked!")
+                        return resp.text, session
+                    else:
+                        print(f"❌ Known proxy {proxy} failed/blocked. Removing from list.")
+                        if proxy in WORKING_PROXIES: WORKING_PROXIES.remove(proxy)
+                except Exception:
+                    print(f"❌ Known proxy {proxy} error/timeout. Removing from list.")
+                    if proxy in WORKING_PROXIES: WORKING_PROXIES.remove(proxy)
+            
+            # Phase B: Fetch fresh proxies if all known ones failed
+            print("[*] Fetching fresh proxies from ProxyScrape...")
+            try:
+                p_resp = c_requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all", timeout=10)
+                if p_resp.status_code == 200:
+                    new_proxies = [p.strip() for p in p_resp.text.split('\n') if p.strip()]
+                    random.shuffle(new_proxies)
+                    
+                    for proxy in new_proxies:
+                        session.proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+                        try:
+                            resp = session.get(target_url, allow_redirects=True, timeout=10)
+                            if resp.status_code == 200 and "sp_fallback" not in resp.text:
+                                print(f"✅ New Proxy {proxy} bypassed StackProtect! Saving to working list.")
+                                if proxy not in WORKING_PROXIES: WORKING_PROXIES.append(proxy)
+                                return resp.text, session
+                        except Exception:
+                            continue
+            except Exception as e:
+                print(f"⚠️ Failed to fetch new proxies: {e}")
+                
+            print("⏳ Exhausted proxy batch. Retrying in 5 seconds...")
+            time.sleep(5)
 
     try:
-        # Try direct connection first
-        response = session.get(url, allow_redirects=True, timeout=20)
-        html_content = response.text
-        
-        # --- PROXY ROTATION LOGIC FOR UNLOCKIFY ---
-        if "unlockify.ink" in url and (response.status_code == 403 or "sp_fallback" in html_content):
-            print("⚠️ Direct connection blocked by StackProtect. Activating Proxy Rotation...")
-            html_content = None
-            
-            for attempt in range(10):
-                # Replenish proxies if we are running low
-                if len(GLOBAL_PROXY_LIST) < 5:
-                    print("[*] Fetching fresh proxies from ProxyScrape...")
-                    try:
-                        p_resp = c_requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all", timeout=10)
-                        if p_resp.status_code == 200:
-                            new_proxies = [p.strip() for p in p_resp.text.split('\n') if p.strip()]
-                            random.shuffle(new_proxies)
-                            GLOBAL_PROXY_LIST.extend(new_proxies)
-                    except Exception as e:
-                        print(f"⚠️ Failed to fetch proxies: {e}")
-                
-                if not GLOBAL_PROXY_LIST:
-                    break
-                    
-                current_proxy = GLOBAL_PROXY_LIST.pop(0)
-                print(f"[*] Attempt {attempt+1}: Testing Proxy {current_proxy}")
-                session.proxies = {"http": f"http://{current_proxy}", "https": f"http://{current_proxy}"}
-                
-                try:
-                    p_resp = session.get(url, allow_redirects=True, timeout=10)
-                    if p_resp.status_code == 200 and "sp_fallback" not in p_resp.text:
-                        print(f"✅ Proxy {current_proxy} bypassed StackProtect successfully!")
-                        html_content = p_resp.text
-                        break
-                except Exception:
-                    continue
-                    
-            if not html_content:
-                return None, "❌ Target blocked direct IP and all 10 proxy attempts failed."
-                
-        elif response.status_code == 403:
+        html_content, active_session = fetch_with_proxy(url)
+        if html_content == "403_FORBIDDEN":
             return None, f"❌ Target actively blocked Chrome impersonation (403): {url}"
+        if not html_content:
+            return None, "❌ Failed to retrieve page."
 
         # ---------------- INTERNAL EXTRACTORS ----------------
         def attempt_js_map_extract(page_url, page_html):
@@ -273,7 +291,7 @@ def scrape_target_url(url, allowed_domains):
                         try:
                             base_path = page_url.split('?')[0].rsplit('/', 1)[0]
                             map_url = f"{base_path}/obfuscatedMap.js"
-                            map_resp = session.get(map_url, timeout=10)
+                            map_resp = active_session.get(map_url, timeout=10)
                             if map_resp.status_code == 200:
                                 map_match = re.search(rf'["\']{re.escape(raw_param)}["\']\s*:\s*["\']([^"\']+)["\']', map_resp.text)
                                 if map_match: final_code = map_match.group(1)
@@ -296,7 +314,7 @@ def scrape_target_url(url, allowed_domains):
 
             if video_url:
                 try:
-                    cookie_str = "; ".join([f"{k}={v}" for k, v in session.cookies.get_dict().items()])
+                    cookie_str = "; ".join([f"{k}={v}" for k, v in active_session.cookies.get_dict().items()])
                     req = urllib.request.Request(video_url, headers={
                         'User-Agent': 'Mozilla/5.0', 'Accept': '*/*', 'Referer': page_url, 'Cookie': cookie_str
                     })
@@ -314,20 +332,16 @@ def scrape_target_url(url, allowed_domains):
         dl_flag, dl_path = attempt_direct_download(url, html_content)
         if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
 
-        # Check for Unlockify reward tag!
+        # Specially target the 'data-reward-url' attribute found in unlockify clones
         reward_match = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
-        if reward_match:
-            print("✅ Found Telegram link perfectly inside data-reward-url attribute!")
-            return reward_match.group(1), html_content
+        if reward_match: return reward_match.group(1), html_content
 
         js_tg_link = attempt_js_map_extract(url, html_content)
         if js_tg_link: return js_tg_link, html_content
 
         tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
         match = re.search(tg_pattern, html_content)
-        if match:
-            print("✅ Found Telegram link on the FIRST page!")
-            return match.group(1), html_content
+        if match: return match.group(1), html_content
             
         all_links = re.findall(r'["\'](https?://[^\'"]+)["\']', html_content)
         intermediary_link = None
@@ -340,7 +354,6 @@ def scrape_target_url(url, allowed_domains):
             if not intermediary_link: intermediary_link = link
 
         if not intermediary_link:
-            print("❌ Failed: No valid intermediary links matched our domain list.")
             return None, html_content
 
         # Internal Routing Fallbacks
@@ -348,43 +361,13 @@ def scrape_target_url(url, allowed_domains):
         if any(d in intermediary_link for d in ["jilhub", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"]):
             return "FIRESTORE", intermediary_link
             
-        print(f"Found matching intermediary link: {intermediary_link}")
+        # Process Intermediary Link using the proxy logic
+        html_content, active_session = fetch_with_proxy(intermediary_link)
+        if html_content == "403_FORBIDDEN":
+            return None, f"❌ Intermediary page blocked us (403): {intermediary_link}"
+        if not html_content:
+            return None, "❌ Failed to retrieve intermediary page."
         
-        # Reset proxy for intermediary link just in case
-        session.proxies = {}
-        response2 = session.get(intermediary_link, allow_redirects=True, timeout=20)
-        html_content = response2.text
-        
-        # --- PROXY ROTATION FOR INTERMEDIARY LINK ---
-        if "unlockify.ink" in intermediary_link and (response2.status_code == 403 or "sp_fallback" in html_content):
-            print("⚠️ Intermediary Unlockify blocked direct IP. Activating proxy rotation...")
-            html_content = None
-            
-            for attempt in range(10):
-                if len(GLOBAL_PROXY_LIST) < 5:
-                    try:
-                        p_resp = c_requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all", timeout=10)
-                        if p_resp.status_code == 200:
-                            new_proxies = [p.strip() for p in p_resp.text.split('\n') if p.strip()]
-                            random.shuffle(new_proxies)
-                            GLOBAL_PROXY_LIST.extend(new_proxies)
-                    except: pass
-                
-                if not GLOBAL_PROXY_LIST: break
-                    
-                current_proxy = GLOBAL_PROXY_LIST.pop(0)
-                session.proxies = {"http": f"http://{current_proxy}", "https": f"http://{current_proxy}"}
-                try:
-                    p_resp = session.get(intermediary_link, allow_redirects=True, timeout=10)
-                    if p_resp.status_code == 200 and "sp_fallback" not in p_resp.text:
-                        print(f"✅ Proxy {current_proxy} bypassed StackProtect on Intermediary!")
-                        html_content = p_resp.text
-                        break
-                except Exception: continue
-                    
-            if not html_content:
-                return None, "❌ Intermediary target blocked direct IP and all proxy attempts failed."
-
         dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
         if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
 
@@ -400,11 +383,9 @@ def scrape_target_url(url, allowed_domains):
         sub2_match = re.search(r'(https://sub2unlock\.me/[a-zA-Z0-9]+)', html_content)
         if sub2_match: return "SUB2UNLOCK", sub2_match.group(1)
 
-        print("❌ Failed: Intermediary page did not contain a Telegram link.")
         return None, html_content
             
     except Exception as e:
-        print(f"❌ Error scraping URL: {e}")
         return None, f"Error Exception: {str(e)}\n\nLast HTML extracted:\n{html_content}"
 
 
@@ -457,26 +438,20 @@ def extract_video_metadata(file_path):
             cv2.imwrite(thumb_path, frame)
         cap.release()
         return DocumentAttributeVideo(duration=duration, w=w, h=h, supports_streaming=True), thumb_path
-    except Exception as e:
-        print(f"⚠️ Metadata extraction error: {e}")
-        return None, None
+    except Exception: return None, None
 
 
 # ====================================================================
-# Background Task Processor
+# CORE LINK PROCESSOR
 # ====================================================================
 async def process_single_link(url_to_visit, chat_name):
-    print(f"\nProcessing Link: {url_to_visit}")
-
+    print(f"\n⚙️ Processing: {url_to_visit}")
     bot_start_link = None
     debug_content = None
 
-    is_firestore_site = any(domain in url_to_visit for domain in [
-        "jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", 
-        "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"
-    ])
+    is_firestore = any(domain in url_to_visit for domain in ["jilhub.xyz", "jilhub.giize", "jillanthaya.giize", "video.jilhub.xyz", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"])
     
-    if is_firestore_site:
+    if is_firestore:
         loop = asyncio.get_running_loop()
         bot_start_link = await loop.run_in_executor(None, bypass_firestore_sync, url_to_visit)
         debug_content = "Extracted via Direct Firestore API"
@@ -488,78 +463,53 @@ async def process_single_link(url_to_visit, chat_name):
         scrape_result = await loop.run_in_executor(None, scrape_target_url, url_to_visit, INTERMEDIARY_DOMAINS)
         bot_start_link, debug_content = scrape_result
         
-        # Internal Routing Fallbacks
         if bot_start_link == "SUB2UNLOCK":
-            print(f"🔄 Routing internal link to Sub2Unlock.me Bypasser...")
             bot_start_link = await bypass_sub2unlock(debug_content)
         elif bot_start_link == "FIRESTORE":
-            print(f"🔄 Routing internal link to Firestore Bypasser...")
             bot_start_link = await loop.run_in_executor(None, bypass_firestore_sync, debug_content)
 
-    # ==========================================================
-    # DIRECT VIDEO UPLOADER
-    # ==========================================================
+    # --- NATIVE FILE DOWNLOAD ---
     if bot_start_link == "DOWNLOADED_FILE":
         temp_file_name = debug_content
-        file_size_mb = os.path.getsize(temp_file_name) / (1024 * 1024)
-        print(f"✅ Local download complete! Size: {file_size_mb:.2f} MB")
-        
         loop = asyncio.get_running_loop()
         attr, thumb_path = await loop.run_in_executor(None, extract_video_metadata, temp_file_name)
-        attrs_list = [attr] if attr else []
-
-        async def upload_progress(current, total):
-            print(f"Uploading: {current * 100 / total:.1f}%", end='\r')
-
+        
         try:
             sent_msg = await client.send_file(
-                DESTINATION_CHAT, 
-                file=temp_file_name, 
+                DESTINATION_CHAT, file=temp_file_name, 
                 caption=f"Extracted direct video from {chat_name}\nLink: {url_to_visit}",
-                progress_callback=upload_progress,
-                supports_streaming=True,
-                attributes=attrs_list,
-                thumb=thumb_path
+                supports_streaming=True, attributes=[attr] if attr else [], thumb=thumb_path
             )
-            print("\n✅ Upload complete to DESTINATION_CHAT!")
             await asyncio.sleep(2)
             
             if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
                 await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
-                print("✅ Copied to DESTINATION_CHAT_2!")
                 
-        except Exception as upload_err:
-            print(f"\n❌ FAILED DURING UPLOAD TO TELEGRAM: {upload_err}")
-            
-        if os.path.exists(temp_file_name): os.remove(temp_file_name)
-        if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
+        except Exception as e: print(f"Upload failed: {e}")
+        finally:
+            if os.path.exists(temp_file_name): os.remove(temp_file_name)
+            if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
         return 
 
-    # ---> FAILURE LOGIC <---
+    # --- FAILURE LOGIC ---
     if not bot_start_link:
         print("Failed to get link. Sending debug HTML to Saved Messages...")
         caption = f"❌ **Extraction Failed**\nCould not find a valid link inside:\n{url_to_visit}"
-        
-        if debug_content and isinstance(debug_content, str):
-            debug_file = io.BytesIO(debug_content.encode('utf-8'))
-            debug_file.name = "debug_page_source.txt"
-            await client.send_file('me', file=debug_file, caption=caption)
-        else:
-            await client.send_message('me', caption + "\n\n(No HTML content was retrieved)")
+        try:
+            if debug_content and isinstance(debug_content, str):
+                debug_file = io.BytesIO(debug_content.encode('utf-8'))
+                debug_file.name = "debug_page_source.txt"
+                await client.send_file('me', file=debug_file, caption=caption)
+            else:
+                await client.send_message('me', caption + "\n\n(No HTML content was retrieved)")
+        except: pass
         return 
 
-    # ==========================================================
-    # BOT CONVERSATION HANDLER
-    # ==========================================================
-    parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
-    parsed = re.search(parse_pattern, bot_start_link)
-
+    # --- INTERACTING WITH BOTS ---
+    parsed = re.search(r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)", bot_start_link)
     if parsed:
-        bot_username = parsed.group(1)
-        start_token = parsed.group(2)
-
+        bot_username, start_token = parsed.groups()
         try:
-            print(f"⏳ Waiting in queue to interact with @{bot_username}...")
             async with bot_locks[bot_username]:
                 async with client.conversation(bot_username, timeout=30) as conv:
                     await conv.send_message(f"/start {start_token}")
@@ -571,76 +521,79 @@ async def process_single_link(url_to_visit, chat_name):
                             response = await conv.get_response(timeout=wait_time)
                             if response.media and (response.video or response.document or response.photo):
                                 target_media_msgs.append(response)
-                        except asyncio.TimeoutError:
-                            break 
+                        except asyncio.TimeoutError: break 
 
-                    if target_media_msgs:
-                        for idx, target_media_msg in enumerate(target_media_msgs, 1):
+                    for idx, target_media_msg in enumerate(target_media_msgs, 1):
+                        try:
+                            sent_msg = await client.send_message(DESTINATION_CHAT, message=target_media_msg)
+                            await asyncio.sleep(2)
+                            
+                            if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
+                                await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
+                                await asyncio.sleep(2)
+                                
+                        except Exception:
+                            temp_path = None
+                            thumb_path = None
                             try:
-                                sent_msg = await client.send_message(DESTINATION_CHAT, message=target_media_msg)
+                                is_video = bool(target_media_msg.video or target_media_msg.document)
+                                extension = ".mp4" if is_video else ".jpg"
+                                video_attributes = []
+                                if is_video and target_media_msg.document:
+                                    for a in target_media_msg.document.attributes:
+                                        if isinstance(a, DocumentAttributeVideo): video_attributes.append(a)
+                                
+                                if target_media_msg.document and target_media_msg.document.thumbs:
+                                    thumb_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
+                                    await client.download_media(target_media_msg.document.thumbs[0], file=thumb_path)
+
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
+                                    temp_path = tmp_file.name
+                                    
+                                await client.download_media(target_media_msg, file=temp_path)
+                                
+                                if is_video and not video_attributes:
+                                    loop = asyncio.get_running_loop()
+                                    attr, gen_thumb = await loop.run_in_executor(None, extract_video_metadata, temp_path)
+                                    if attr: video_attributes.append(attr)
+                                    if gen_thumb and not thumb_path: thumb_path = gen_thumb
+
+                                sent_msg = await client.send_file(
+                                    DESTINATION_CHAT, file=temp_path, 
+                                    caption=f"Extracted from {chat_name}\nBot: @{bot_username}",
+                                    supports_streaming=is_video, attributes=video_attributes if video_attributes else None, thumb=thumb_path if is_video else None
+                                )
                                 await asyncio.sleep(2)
                                 
                                 if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
                                     await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
                                     await asyncio.sleep(2)
                                     
-                            except Exception as forward_err:
-                                temp_path = None
-                                thumb_path = None
-                                try:
-                                    is_video = bool(target_media_msg.video or target_media_msg.document)
-                                    extension = ".mp4" if is_video else ".jpg"
-                                    
-                                    video_attributes = []
-                                    if is_video and target_media_msg.document:
-                                        for a in target_media_msg.document.attributes:
-                                            if isinstance(a, DocumentAttributeVideo):
-                                                video_attributes.append(a)
-                                    
-                                    if target_media_msg.document and target_media_msg.document.thumbs:
-                                        thumb_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
-                                        await client.download_media(target_media_msg.document.thumbs[0], file=thumb_path)
-
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
-                                        temp_path = tmp_file.name
-                                        
-                                    await client.download_media(target_media_msg, file=temp_path)
-                                    
-                                    if is_video and not video_attributes:
-                                        loop = asyncio.get_running_loop()
-                                        attr, gen_thumb = await loop.run_in_executor(None, extract_video_metadata, temp_path)
-                                        if attr: video_attributes.append(attr)
-                                        if gen_thumb and not thumb_path: thumb_path = gen_thumb
-
-                                    sent_msg = await client.send_file(
-                                        DESTINATION_CHAT, 
-                                        file=temp_path, 
-                                        caption=f"Extracted from {chat_name} (File {idx}/{len(target_media_msgs)})\nBot: @{bot_username}",
-                                        supports_streaming=is_video,
-                                        attributes=video_attributes if video_attributes else None,
-                                        thumb=thumb_path if is_video else None
-                                    )
-                                    await asyncio.sleep(2)
-                                    
-                                    if FORWARD_TO_CH2 and sent_msg and sent_msg.media:
-                                        await client.send_file(DESTINATION_CHAT_2, file=sent_msg.media, caption="")
-                                        await asyncio.sleep(2)
-                                        
-                                except Exception as manual_err:
-                                    print(f"\n❌ Manual download/upload for file {idx} failed: {manual_err}")
-                                finally:
-                                    if temp_path and os.path.exists(temp_path): os.remove(temp_path)
-                                    if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
-                    else:
-                        print(f"❌ @{bot_username} did not send any media files.")
-                        await client.send_message('me', f"⚠️ **Target Bot Failed**\n@{bot_username} did not send media for link:\n{url_to_visit}")
+                            except Exception: pass
+                            finally:
+                                if temp_path and os.path.exists(temp_path): os.remove(temp_path)
+                                if thumb_path and os.path.exists(thumb_path): os.remove(thumb_path)
         except Exception as e:
-            print(f"Conversation with @{bot_username} failed: {e}")
+            print(f"Conversation error: {e}")
 
 
 # ====================================================================
-# SEQUENTIAL HANDLER LOGIC
+# SEQUENTIAL LINK QUEUE WORKER
 # ====================================================================
+async def queue_worker():
+    print("✅ Link Processing Queue is running...")
+    while True:
+        url_to_visit, chat_name = await LINK_QUEUE.get()
+        try:
+            await process_single_link(url_to_visit, chat_name)
+        except Exception as e:
+            print(f"❌ Worker Error: {e}")
+        finally:
+            # 4 Second interval ensures safe sequential processing between entirely separate links
+            await asyncio.sleep(4) 
+            LINK_QUEUE.task_done()
+
+
 @client.on(events.NewMessage(chats=SOURCE_CHATS))
 async def handler(event):
     chat = await event.get_chat()
@@ -651,15 +604,10 @@ async def handler(event):
 
     print(f"--- New Message from {chat_name} (Found {len(links)} links) ---")
     
-    # Enqueue links into the Global Lock sequentially
+    # Enqueue links instantly without blocking incoming messages
     for url_to_visit in links:
-        async def run_locked(url, c_name):
-            async with PROCESS_LOCK:
-                await process_single_link(url, c_name)
-                # Mandatory cooldown before releasing the lock for the next link
-                await asyncio.sleep(4)
-                
-        asyncio.create_task(run_locked(url_to_visit, chat_name))
+        await LINK_QUEUE.put((url_to_visit, chat_name))
+        print(f"➕ Queued: {url_to_visit} (Queue size: {LINK_QUEUE.qsize()})")
 
 
 # ====================================================================
@@ -670,9 +618,7 @@ async def track_join_requests(update):
     if isinstance(update, UpdateBotChatInviteRequester):
         channel_id = update.peer.channel_id
         user_id = update.user_id
-        if channel_id in join_requests:
-            join_requests[channel_id].add(user_id)
-            print(f"[*] User {user_id} requested to join channel {channel_id}")
+        if channel_id in join_requests: join_requests[channel_id].add(user_id)
 
 @bot_client.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
@@ -736,7 +682,10 @@ async def main():
     print("Starting Join-Gate Bot...")
     await bot_client.start(bot_token=BOT_TOKEN)
     
-    print("✅ Both clients are running simultaneously!")
+    # Launch the background Queue Worker
+    asyncio.create_task(queue_worker())
+    
+    print("✅ Both clients are running! Ready to process incoming messages.")
     await asyncio.gather(
         client.run_until_disconnected(),
         bot_client.run_until_disconnected()
@@ -744,4 +693,5 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
 
