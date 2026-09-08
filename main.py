@@ -213,183 +213,226 @@ async def bypass_sub2unlock(url):
 
 
 # ====================================================================
-# FAST CURL_CFFI SCRAPER FOR FILES.FM / UNLOCKIFY / DEEP LINKS
+# FAST CURL_CFFI SCRAPER FOR FILES.FM / JS MAPS / DEEP LINKS
 # ====================================================================
 def scrape_target_url(url, allowed_domains):
     print(f"Scraping URL: {url}")
     IGNORED_EXTENSIONS = ('.ico', '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.xml', '.json')
     html_content = "" 
-    session = c_requests.Session(impersonate="chrome110")
     
-    # Required to prevent shorteners from blocking the scraper
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
+    # --- PROXY ROTATION LOGIC FOR UNLOCKIFY ---
+    is_unlockify = "unlockify.ink" in url
+    proxy_list = []
+    
+    if is_unlockify:
+        print("[*] Unlockify detected! Fetching fresh proxy list to bypass Heroku IP ban...")
+        try:
+            # ProxyScrape API returns a fresh list of working HTTP/S proxies
+            p_resp = c_requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=yes&anonymity=all", timeout=10)
+            if p_resp.status_code == 200:
+                proxy_list = [p.strip() for p in p_resp.text.split('\n') if p.strip()]
+                print(f"[*] Successfully fetched {len(proxy_list)} proxies.")
+        except Exception as e:
+            print(f"⚠️ Failed to fetch proxies: {e}")
 
-    try:
-        response = session.get(url, allow_redirects=True, timeout=20)
-        if response.status_code == 403:
-            return None, f"❌ Target actively blocked Chrome impersonation (403): {url}"
-            
-        html_content = response.text
+    # Try up to 5 proxies if unlockify. Otherwise, just do 1 attempt.
+    max_attempts = 5 if is_unlockify and proxy_list else 1
 
-        # ---------------- INTERNAL EXTRACTORS ----------------
-        def attempt_js_map_extract(page_url, page_html):
-            if "${code}" in page_html and "t.me/" in page_html:
-                print("Detecting JS-based locker page...")
-                bot_match = re.search(r'https://t\.me/([a-zA-Z0-9_]+)\?start=\$\{code\}', page_html)
-                if bot_match:
-                    bot_username = bot_match.group(1)
-                    parsed_url = urlparse(page_url)
-                    query_params = parse_qs(parsed_url.query)
-                    if 'p' in query_params:
-                        raw_param = query_params['p'][0]
-                        final_code = raw_param 
-                        try:
-                            base_path = page_url.split('?')[0].rsplit('/', 1)[0]
-                            map_url = f"{base_path}/obfuscatedMap.js"
-                            map_resp = session.get(map_url, timeout=10)
-                            if map_resp.status_code == 200:
-                                map_match = re.search(rf'["\']{re.escape(raw_param)}["\']\s*:\s*["\']([^"\']+)["\']', map_resp.text)
-                                if map_match:
-                                    final_code = map_match.group(1)
-                                    print(f"✅ Decoded obfuscated param: {raw_param} -> {final_code}")
-                        except Exception as e:
-                            print(f"⚠️ Could not process obfuscatedMap.js: {e}")
-                        
-                        telegram_link = f"https://t.me/{bot_username}?start={final_code}"
-                        print(f"✅ Generated Telegram Deep Link: {telegram_link}")
-                        return telegram_link
-            return None
-
-        def attempt_direct_download(page_url, page_html):
-            video_url = None
-            if "files.fm" in page_url:
-                meta_match = re.search(r'property="og:image".*?content="https://([^/]+)/thumb_video_picture\.php\?i=([^"]+)"', page_html)
-                sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", page_html)
-                if meta_match and sess_match:
-                    host = meta_match.group(1).strip()
-                    file_hash = meta_match.group(2).strip()
-                    sess_id = sess_match.group(1).strip()
-                    v_match = re.search(r'\.mp4\?v=(\d+)', page_html)
-                    v_val = v_match.group(1).strip() if v_match else "1771587749"
-                    video_url = f"https://{host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
-
-            if video_url:
-                print(f"✅ Generated Direct Video Link: {video_url}")
-                print("⬇️ Downloading file natively to bypass HTTP/2 chunking bugs...")
-                try:
-                    cookie_str = "; ".join([f"{k}={v}" for k, v in session.cookies.get_dict().items()])
-                    req = urllib.request.Request(
-                        video_url, 
-                        headers={
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-                            'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
-                            'Referer': page_url,
-                            'Accept-Language': 'en-US,en;q=0.9',
-                            'Connection': 'keep-alive',
-                            'Cookie': cookie_str
-                        }
-                    )
-                    with urllib.request.urlopen(req, timeout=120) as vid_resp:
-                        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                        shutil.copyfileobj(vid_resp, tmp_file)
-                        tmp_file.close()
-                        
-                        if os.path.getsize(tmp_file.name) > 100000:
-                            return "DOWNLOADED_FILE", tmp_file.name
-                        else:
-                            os.remove(tmp_file.name)
-                            print("❌ Downloaded file was too small. Likely an HTML error page.")
-                except Exception as e:
-                    print(f"❌ Exception during native download: {e}")
-            return None, None
-        # -----------------------------------------------------
-
-        # Check First Page for direct video download
-        dl_flag, dl_path = attempt_direct_download(url, html_content)
-        if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
-
-        # Specially target the 'data-reward-url' attribute found in unlockify clones
-        reward_match = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
-        if reward_match:
-            print("✅ Found Telegram link perfectly inside data-reward-url attribute!")
-            return reward_match.group(1), html_content
-
-        js_tg_link = attempt_js_map_extract(url, html_content)
-        if js_tg_link: return js_tg_link, html_content
-
-        tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
-        match = re.search(tg_pattern, html_content)
-        if match:
-            print("✅ Found Telegram link on the FIRST page!")
-            return match.group(1), html_content
-            
-        print("No Telegram link found. Searching for intermediary links...")
-        all_links = re.findall(r'["\'](https?://[^\'"]+)["\']', html_content)
+    for attempt in range(max_attempts):
+        session = c_requests.Session(impersonate="chrome110")
+        session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
         
-        intermediary_link = None
-        for link in all_links:
-            matched_domain = False
-            for domain in allowed_domains:
-                if domain in link:
-                    matched_domain = True
-                    break
-            if not matched_domain or link.lower().endswith(IGNORED_EXTENSIONS):
+        # Inject proxy for this attempt
+        if is_unlockify and proxy_list:
+            current_proxy = proxy_list[attempt % len(proxy_list)]
+            session.proxies = {"http": f"http://{current_proxy}", "https": f"http://{current_proxy}"}
+            print(f"[*] Attempt {attempt+1}/{max_attempts} using Proxy: {current_proxy}")
+
+        try:
+            response = session.get(url, allow_redirects=True, timeout=15)
+            if response.status_code == 403:
+                if is_unlockify:
+                    print("❌ Proxy received 403 Forbidden. Trying next...")
+                    continue
+                return None, f"❌ Target actively blocked Chrome impersonation (403): {url}"
+                
+            html_content = response.text
+            
+            # Did the proxy still trigger the StackProtect check? If so, ditch it and try next!
+            if is_unlockify and "sp_fallback" in html_content:
+                print("❌ Proxy triggered StackProtect 'verify you are human' wall. Trying next...")
                 continue
-            if "/202" in link or ".html" in link or "/video" in link or "sub2unlock.me" in link:
-                intermediary_link = link
+                
+            break # Success! Clean HTML fetched.
+        except Exception as e:
+            if is_unlockify:
+                print(f"❌ Proxy Connection Failed ({e}). Trying next...")
+                continue
+            return None, f"Error Exception: {str(e)}\n\nLast HTML extracted:\n{html_content}"
+    else:
+        # This triggers if all 5 attempts fail
+        if is_unlockify:
+            return None, f"❌ Failed to bypass unlockify after {max_attempts} proxy attempts.\nLast HTML:\n{html_content}"
+
+    # ---------------- INTERNAL EXTRACTORS ----------------
+    def attempt_js_map_extract(page_url, page_html):
+        if "${code}" in page_html and "t.me/" in page_html:
+            print("Detecting JS-based locker page...")
+            bot_match = re.search(r'https://t\.me/([a-zA-Z0-9_]+)\?start=\$\{code\}', page_html)
+            if bot_match:
+                bot_username = bot_match.group(1)
+                parsed_url = urlparse(page_url)
+                query_params = parse_qs(parsed_url.query)
+                if 'p' in query_params:
+                    raw_param = query_params['p'][0]
+                    final_code = raw_param 
+                    try:
+                        base_path = page_url.split('?')[0].rsplit('/', 1)[0]
+                        map_url = f"{base_path}/obfuscatedMap.js"
+                        map_resp = session.get(map_url, timeout=10)
+                        if map_resp.status_code == 200:
+                            map_match = re.search(rf'["\']{re.escape(raw_param)}["\']\s*:\s*["\']([^"\']+)["\']', map_resp.text)
+                            if map_match:
+                                final_code = map_match.group(1)
+                                print(f"✅ Decoded obfuscated param: {raw_param} -> {final_code}")
+                    except Exception as e:
+                        print(f"⚠️ Could not process obfuscatedMap.js: {e}")
+                    
+                    telegram_link = f"https://t.me/{bot_username}?start={final_code}"
+                    print(f"✅ Generated Telegram Deep Link: {telegram_link}")
+                    return telegram_link
+        return None
+
+    def attempt_direct_download(page_url, page_html):
+        video_url = None
+        if "files.fm" in page_url:
+            meta_match = re.search(r'property="og:image".*?content="https://([^/]+)/thumb_video_picture\.php\?i=([^"]+)"', page_html)
+            sess_match = re.search(r"var\s+PHPSESSID\s*=\s*['\"]([^'\"]+)['\"]", page_html)
+            if meta_match and sess_match:
+                host = meta_match.group(1).strip()
+                file_hash = meta_match.group(2).strip()
+                sess_id = sess_match.group(1).strip()
+                v_match = re.search(r'\.mp4\?v=(\d+)', page_html)
+                v_val = v_match.group(1).strip() if v_match else "1771587749"
+                video_url = f"https://{host}/thumb_video/{file_hash}.mp4?v={v_val}&PHPSESSID={sess_id}"
+
+        if video_url:
+            print(f"✅ Generated Direct Video Link: {video_url}")
+            print("⬇️ Downloading file natively to bypass HTTP/2 chunking bugs...")
+            try:
+                cookie_str = "; ".join([f"{k}={v}" for k, v in session.cookies.get_dict().items()])
+                req = urllib.request.Request(
+                    video_url, 
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+                        'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
+                        'Referer': page_url,
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Connection': 'keep-alive',
+                        'Cookie': cookie_str
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=120) as vid_resp:
+                    tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                    shutil.copyfileobj(vid_resp, tmp_file)
+                    tmp_file.close()
+                    
+                    if os.path.getsize(tmp_file.name) > 100000:
+                        return "DOWNLOADED_FILE", tmp_file.name
+                    else:
+                        os.remove(tmp_file.name)
+                        print("❌ Downloaded file was too small. Likely an HTML error page.")
+            except Exception as e:
+                print(f"❌ Exception during native download: {e}")
+        return None, None
+    # -----------------------------------------------------
+
+    # Check First Page for direct video download
+    dl_flag, dl_path = attempt_direct_download(url, html_content)
+    if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
+
+    # Specially target the 'data-reward-url' attribute found in unlockify clones
+    reward_match = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
+    if reward_match:
+        print("✅ Found Telegram link perfectly inside data-reward-url attribute!")
+        return reward_match.group(1), html_content
+
+    js_tg_link = attempt_js_map_extract(url, html_content)
+    if js_tg_link: return js_tg_link, html_content
+
+    tg_pattern = r"(https://t\.me/[a-zA-Z0-9_]+(?:\?start=)[a-zA-Z0-9_\-]+)"
+    match = re.search(tg_pattern, html_content)
+    if match:
+        print("✅ Found Telegram link on the FIRST page!")
+        return match.group(1), html_content
+        
+    print("No Telegram link found. Searching for intermediary links...")
+    all_links = re.findall(r'["\'](https?://[^\'"]+)["\']', html_content)
+    
+    intermediary_link = None
+    for link in all_links:
+        matched_domain = False
+        for domain in allowed_domains:
+            if domain in link:
+                matched_domain = True
                 break
-            if not intermediary_link:
-                intermediary_link = link
-
+        if not matched_domain or link.lower().endswith(IGNORED_EXTENSIONS):
+            continue
+        if "/202" in link or ".html" in link or "/video" in link or "sub2unlock.me" in link:
+            intermediary_link = link
+            break
         if not intermediary_link:
-            print("❌ Failed: No valid intermediary links matched our domain list.")
-            return None, html_content
+            intermediary_link = link
 
-        # Internal Routing Fallbacks from Intermediary Links
-        if "sub2unlock.me" in intermediary_link:
-            print("✅ Found Sub2Unlock.me inside page! Sending back to Playwright...")
-            return "SUB2UNLOCK", intermediary_link
-            
-        if any(d in intermediary_link for d in ["jilhub", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"]):
-            print("✅ Found Firestore Site inside page! Sending back to bypasser...")
-            return "FIRESTORE", intermediary_link
-            
-        print(f"Found matching intermediary link: {intermediary_link}")
-        response2 = session.get(intermediary_link, allow_redirects=True, timeout=20)
-        
-        if response2.status_code == 403:
-            return None, f"❌ Intermediary page blocked us (403): {intermediary_link}"
-            
-        html_content = response2.text
-        
-        dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
-        if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
-
-        # Check secondary page for unlockify style reward urls
-        reward_match_2 = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
-        if reward_match_2:
-            print("✅ Found Telegram link inside data-reward-url attribute on secondary page!")
-            return reward_match_2.group(1), html_content
-
-        js_tg_link = attempt_js_map_extract(intermediary_link, html_content)
-        if js_tg_link: return js_tg_link, html_content
-
-        match2 = re.search(tg_pattern, html_content)
-        if match2:
-            print("✅ Found Telegram link on the SECOND page!")
-            return match2.group(1), html_content
-        
-        sub2_match = re.search(r'(https://sub2unlock\.me/[a-zA-Z0-9]+)', html_content)
-        if sub2_match:
-            print("✅ Found Sub2Unlock.me inside SECOND page! Sending back to Playwright...")
-            return "SUB2UNLOCK", sub2_match.group(1)
-
-        print("❌ Failed: Intermediary page did not contain a Telegram link.")
+    if not intermediary_link:
+        print("❌ Failed: No valid intermediary links matched our domain list.")
         return None, html_content
-            
-    except Exception as e:
-        print(f"❌ Error scraping URL: {e}")
-        return None, f"Error Exception: {str(e)}\n\nLast HTML extracted:\n{html_content}"
+
+    # Internal Routing Fallbacks from Intermediary Links
+    if "sub2unlock.me" in intermediary_link:
+        print("✅ Found Sub2Unlock.me inside page! Sending back to Playwright...")
+        return "SUB2UNLOCK", intermediary_link
+        
+    if any(d in intermediary_link for d in ["jilhub", "clipgo.xyz", "sub2unlock.xyz", "gabadawa.xyz", "jilzone.xyz"]):
+        print("✅ Found Firestore Site inside page! Sending back to bypasser...")
+        return "FIRESTORE", intermediary_link
+        
+    print(f"Found matching intermediary link: {intermediary_link}")
+    
+    # We must use proxies for the second step if it redirects to unlockify
+    session.proxies = {"http": f"http://{current_proxy}", "https": f"http://{current_proxy}"} if (is_unlockify and proxy_list) else None
+
+    response2 = session.get(intermediary_link, allow_redirects=True, timeout=20)
+    
+    if response2.status_code == 403:
+        return None, f"❌ Intermediary page blocked us (403): {intermediary_link}"
+        
+    html_content = response2.text
+    
+    dl_flag, dl_path = attempt_direct_download(intermediary_link, html_content)
+    if dl_flag == "DOWNLOADED_FILE": return dl_flag, dl_path
+
+    # Check secondary page for unlockify style reward urls
+    reward_match_2 = re.search(r'data-reward-url=["\'](https://t\.me/[^"\']+)["\']', html_content)
+    if reward_match_2:
+        print("✅ Found Telegram link inside data-reward-url attribute on secondary page!")
+        return reward_match_2.group(1), html_content
+
+    js_tg_link = attempt_js_map_extract(intermediary_link, html_content)
+    if js_tg_link: return js_tg_link, html_content
+
+    match2 = re.search(tg_pattern, html_content)
+    if match2:
+        print("✅ Found Telegram link on the SECOND page!")
+        return match2.group(1), html_content
+    
+    sub2_match = re.search(r'(https://sub2unlock\.me/[a-zA-Z0-9]+)', html_content)
+    if sub2_match:
+        print("✅ Found Sub2Unlock.me inside SECOND page! Sending back to Playwright...")
+        return "SUB2UNLOCK", sub2_match.group(1)
+
+    print("❌ Failed: Intermediary page did not contain a Telegram link.")
+    return None, html_content
 
 
 def get_all_links(event):
@@ -550,7 +593,7 @@ async def process_single_link(url_to_visit, chat_name):
         return 
 
     # ==========================================================
-    # BOT CONVERSATION HANDLER
+    # BOT CONVERSATION HANDLER (WITH LOCK QUEUE & ALBUM SUPPORT)
     # ==========================================================
     parse_pattern = r"t\.me/([a-zA-Z0-9_]+)\?start=(.+)"
     parsed = re.search(parse_pattern, bot_start_link)
@@ -683,15 +726,14 @@ async def handler(event):
 
     print(f"--- New Message from {chat_name} (Found {len(links)} links) ---")
     
-    # Staggered execution: processes links slowly one by one to avoid 
-    # DDoS triggers on shorteners and Flood Waits on Telegram API.
+    # Process links with a staircase delay (e.g. 0s, 4s, 8s, 12s) 
+    # to completely prevent DDoS triggers on shorteners and avoid Telegram Flood Waits.
     for i, url_to_visit in enumerate(links):
         async def delayed_process(url, c_name, delay):
             if delay > 0:
                 await asyncio.sleep(delay)
             await process_single_link(url, c_name)
             
-        # 4 second delay per link
         asyncio.create_task(delayed_process(url_to_visit, chat_name, i * 4))
 
 
