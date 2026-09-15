@@ -67,7 +67,7 @@ RAW_CH1 = int(str(CHANNEL_1_ID).replace("-100", ""))
 RAW_CH2 = int(str(CHANNEL_2_ID).replace("-100", ""))
 # =========================================================
 
-FORWARD_TO_CH2 = True
+FORWARD_TO_CH2 = False
 # =========================================================
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
